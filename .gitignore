@@ -1,0 +1,10 @@
+target/
+*.mp4
+
+# Python environment for vocal separation (rebuild locally, 1.5 GB)
+tools/venv/
+__pycache__/
+
+# Local machine settings
+.mcp.json
+.claude/

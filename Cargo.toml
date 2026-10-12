@@ -1,0 +1,31 @@
+[package]
+name = "rustcut"
+version = "0.1.0"
+edition = "2021"
+description = "A CapCut-style desktop video editor written in Rust"
+license = "MIT"
+default-run = "rustcut"
+
+[dependencies]
+eframe = "0.29"
+egui = "0.29"
+rfd = "0.15"
+rodio = { version = "0.19", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+ureq = { version = "2.10", features = ["json"] }
+ab_glyph = "0.2"
+rusqlite = { version = "0.30", features = ["bundled"] }
+
+[build-dependencies]
+winresource = "0.1"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
