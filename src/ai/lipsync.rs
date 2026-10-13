@@ -113,7 +113,7 @@ pub fn render_inputs(project: &Project, plan: &Plan, dir: &Path) -> Result<(Path
     Ok((video_out, audio_out))
 }
 
-fn data_uri(path: &Path, mime: &str) -> Result<String> {
+pub fn data_uri(path: &Path, mime: &str) -> Result<String> {
     let bytes = std::fs::read(path)?;
     if bytes.len() > 40_000_000 {
         bail!("{} is too large to send ({} MB)", path.display(), bytes.len() / 1_000_000);
@@ -138,11 +138,17 @@ fn fal_error(e: ureq::Error) -> anyhow::Error {
 /// Sends the segment and the line to fal.ai and downloads the lip-synced video into
 /// `out`. `Ok(None)` if cancelled.
 pub fn run(key: &str, video: &Path, audio: &Path, model: &str, out: &Path, cancel: &AtomicBool, progress: &mut dyn FnMut(f32, &str)) -> Result<Option<PathBuf>> {
-    let agent = ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(15)).timeout_read(Duration::from_secs(300)).build();
-    let auth = format!("Key {key}");
     progress(0.05, "Uploading the shot and the line…");
     let body = json!({ "video_url": data_uri(video, "video/mp4")?, "audio_url": data_uri(audio, "audio/wav")?, "model": model, "sync_mode": "cut_off" });
-    let sub: Value = agent.post(&format!("https://queue.fal.run/{ENDPOINT}")).set("Authorization", &auth).send_json(body).map_err(fal_error)?.into_json()?;
+    fal_run(key, ENDPOINT, body, out, "Lip-syncing…", cancel, progress)
+}
+
+/// Queues a fal.ai job, waits for it, and downloads its `video.url` into `out`.
+/// `Ok(None)` if cancelled.
+pub fn fal_run(key: &str, endpoint: &str, body: Value, out: &Path, working: &str, cancel: &AtomicBool, progress: &mut dyn FnMut(f32, &str)) -> Result<Option<PathBuf>> {
+    let agent = ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(15)).timeout_read(Duration::from_secs(300)).build();
+    let auth = format!("Key {key}");
+    let sub: Value = agent.post(&format!("https://queue.fal.run/{endpoint}")).set("Authorization", &auth).send_json(body).map_err(fal_error)?.into_json()?;
     let status_url = sub["status_url"].as_str().ok_or_else(|| anyhow!("fal.ai did not queue the job: {sub}"))?.to_string();
     let response_url = sub["response_url"].as_str().ok_or_else(|| anyhow!("fal.ai returned no result URL"))?.to_string();
     let t0 = std::time::Instant::now();
@@ -155,7 +161,7 @@ pub fn run(key: &str, video: &Path, audio: &Path, model: &str, out: &Path, cance
         match s["status"].as_str().unwrap_or("") {
             "COMPLETED" => break,
             "IN_QUEUE" => progress(0.15, &format!("Waiting in fal.ai's queue{}…", s["queue_position"].as_u64().map_or(String::new(), |p| format!(" (position {p})")))),
-            _ => progress((0.2 + t0.elapsed().as_secs_f32() / 240.0).min(0.9), "Lip-syncing…"),
+            _ => progress((0.2 + t0.elapsed().as_secs_f32() / 240.0).min(0.9), working),
         }
         if t0.elapsed() > Duration::from_secs(1800) {
             bail!("fal.ai took too long (30 min)");

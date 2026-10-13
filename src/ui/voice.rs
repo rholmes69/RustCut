@@ -34,6 +34,22 @@ pub struct VoiceUi {
     /// The video clip chosen for lip-sync (from the clip's right-click menu or the selection).
     pub lipsync_target: Option<Id>,
     lipsync_job: Option<Task<(crate::ai::lipsync::Plan, PathBuf, crate::media::ffmpeg::ProbeInfo)>>,
+    perf_direction: String,
+    perf_sheet: Option<PathBuf>,
+    perf_job: Option<Task<(crate::ai::performance::Plan, Vec<(PathBuf, crate::media::ffmpeg::ProbeInfo)>)>>,
+}
+
+fn start_performance(app: &mut EditorApp, ctx: &Context, plan: crate::ai::performance::Plan) {
+    let Some(k) = app.ai.settings.fal_key() else { return };
+    let project = app.project.clone();
+    let model = app.ai.settings.performance_model.clone();
+    let direction = app.voice.perf_direction.clone();
+    let sheet = app.voice.perf_sheet.clone();
+    let dir = crate::ai::video_gen::output_dir(app.project_path.as_deref()).join("lipsync");
+    app.voice.perf_job = Some(Task::spawn(ctx.clone(), move |cancel, report| {
+        let opts = crate::ai::performance::Options { model: &model, direction: &direction, sheet: sheet.as_deref() };
+        Ok(crate::ai::performance::perform(&project, &plan, &k, &opts, &dir, cancel, report)?.map(|r| (plan, r)))
+    }));
 }
 
 /// Opens the lip-sync section for `clip` (from the timeline's right-click menu).
@@ -110,6 +126,29 @@ pub fn poll(app: &mut EditorApp) {
                 Err(e) => app.notify_error(format!("Lip-sync: {e:#}")),
             },
             TaskState::Failed(e) => app.notify_error(format!("Lip-sync: {e}")),
+            _ => {}
+        }
+    }
+    if let Some(state) = app.voice.perf_job.as_ref().and_then(Task::take_finished) {
+        app.voice.perf_job = None;
+        match state {
+            TaskState::Done((plan, results)) => {
+                let items: Vec<_> = results.iter().map(|(p, i)| i.clone().into_media_item(p.clone())).collect();
+                match crate::ai::performance::apply(&mut app.project, &plan, results) {
+                    Ok(ids) => {
+                        for item in &items {
+                            if let Some(m) = app.project.media.iter().find(|m| m.path == item.path).cloned() {
+                                app.assets.ensure(&m);
+                            }
+                        }
+                        app.selection = ids.first().copied();
+                        app.voice.lipsync_target = None;
+                        app.notify(format!("🎤 Performance added: {} clip(s) over {:.1} s, synced to the song", ids.len(), plan.end() - plan.start()));
+                    }
+                    Err(e) => app.notify_error(format!("Performance: {e:#}")),
+                }
+            }
+            TaskState::Failed(e) => app.notify_error(format!("Performance: {e}")),
             _ => {}
         }
     }
@@ -414,6 +453,21 @@ fn lipsync_section(ui: &mut egui::Ui, app: &mut EditorApp, save: &mut bool) {
         }
     });
     ui.horizontal(|ui| {
+        ui.label("Method");
+        if ui.radio(!app.ai.settings.lipsync_performance, "Fix the mouth (cheapest)").on_hover_text("Keeps the footage and re-draws only the mouth to match the voice (Sync lipsync-2, ≈ $0.05/s). Best for dialogue.").clicked() {
+            app.ai.settings.lipsync_performance = false;
+            *save = true;
+        }
+        if ui.radio(app.ai.settings.lipsync_performance, "Performance shot (best for singing)").on_hover_text("Re-generates the shot from a still of the singer with Seedance 2.0, driven by the song and its lyrics, in overlapping ≤14 s segments (≈ $0.24–0.30/s).").clicked() {
+            app.ai.settings.lipsync_performance = true;
+            *save = true;
+        }
+    });
+    if app.ai.settings.lipsync_performance {
+        performance_section(ui, app, save);
+        return;
+    }
+    ui.horizontal(|ui| {
         ui.label("Quality");
         for (id, label, _) in lipsync::MODELS {
             if ui.radio(app.ai.settings.lipsync_model == *id, *label).clicked() {
@@ -456,6 +510,74 @@ fn lipsync_section(ui: &mut egui::Ui, app: &mut EditorApp, save: &mut bool) {
         let has_key = app.ai.settings.fal_key().is_some();
         if ui.add_enabled(has_key, Button::new(format!("👄 Lip-sync this shot (≈ ${usd:.2})"))).on_disabled_hover_text(lipsync::NO_KEY).clicked() {
             start_lipsync(app, ui.ctx(), p);
+        }
+    }
+}
+
+fn performance_section(ui: &mut egui::Ui, app: &mut EditorApp, save: &mut bool) {
+    use crate::ai::performance;
+    ui.horizontal(|ui| {
+        ui.label("Model");
+        for (id, label, usd) in performance::MODELS {
+            if ui.radio(app.ai.settings.performance_model == *id, format!("{label} (${usd:.2}/s)")).clicked() {
+                app.ai.settings.performance_model = id.to_string();
+                *save = true;
+            }
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.label("Direction");
+        ui.add(TextEdit::singleline(&mut app.voice.perf_direction).hint_text(performance::DEFAULT_DIRECTION).desired_width(320.0));
+    });
+    ui.horizontal(|ui| {
+        ui.label("Character sheet");
+        match &app.voice.perf_sheet {
+            Some(p) => {
+                ui.label(widgets::dim(p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()));
+                if ui.small_button("✕").clicked() {
+                    app.voice.perf_sheet = None;
+                }
+            }
+            None => {
+                if ui.small_button("Choose… (optional)").on_hover_text("A reference sheet keeps the face consistent when the singer turns").clicked() {
+                    app.voice.perf_sheet = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "webp"]).pick_file();
+                }
+            }
+        }
+    });
+    let target = app.voice.lipsync_target.filter(|id| app.project.clip(*id).is_some()).or(app.selection);
+    let plan = target.map(|id| performance::plan(&app.project, id, None));
+    let model = app.ai.settings.performance_model.clone();
+    match &plan {
+        None => {
+            ui.label(widgets::dim("Select the singer's shot (video or still) on the timeline, over the song."));
+        }
+        Some(Err(e)) => {
+            ui.label(RichText::new(format!("⚠ {e}")).color(theme::DANGER));
+        }
+        Some(Ok(p)) => {
+            ui.label(widgets::dim(format!("{} – {}  ·  {} segment(s)  ·  estimated ${:.2}", widgets::format_short(p.start()), widgets::format_short(p.end()), p.segments.len(), p.estimate(&model))));
+            for (i, s) in p.segments.iter().enumerate() {
+                let words = if s.lyrics.is_empty() { "(no lyrics on the timeline here)".to_string() } else { s.lyrics.chars().take(90).collect() };
+                ui.label(widgets::dim(format!("  {}. {}–{}  {}", i + 1, widgets::format_short(s.start), widgets::format_short(s.end), words)).small());
+            }
+        }
+    }
+    if let Some(job) = &app.voice.perf_job {
+        let text = job.progress().map(|(_, t)| t).unwrap_or_else(|| "Starting…".into());
+        let mut cancel = false;
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label(text);
+            cancel = ui.small_button("Cancel").clicked();
+        });
+        if cancel {
+            job.cancel();
+        }
+    } else if let Some(Ok(p)) = plan {
+        let has_key = app.ai.settings.fal_key().is_some();
+        if ui.add_enabled(has_key, Button::new(format!("🎤 Make performance shot (≈ ${:.2})", p.estimate(&model)))).on_disabled_hover_text(crate::ai::lipsync::NO_KEY).clicked() {
+            start_performance(app, ui.ctx(), p);
         }
     }
 }

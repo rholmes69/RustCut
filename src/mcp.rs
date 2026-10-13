@@ -177,6 +177,7 @@ impl<W: Write> Server<W> {
             "speak_line" => self.speak_line(a),
             "clone_voice" => self.clone_voice(a),
             "lip_sync" => self.lip_sync(a),
+            "performance_shot" => self.performance_shot(a),
             "set_price" => self.set_price(a),
             "generate_thumbnail" => self.generate_thumbnail(a, progress),
             "generate_still" => self.generate_still(a, progress),
@@ -1804,6 +1805,37 @@ impl<W: Write> Server<W> {
         })))
     }
 
+    fn performance_shot(&mut self, a: &Value) -> Result<Vec<Value>> {
+        use crate::ai::performance;
+        let settings = crate::ai::openrouter::AiSettings::load();
+        let key = settings.fal_key().ok_or_else(|| anyhow!(crate::ai::lipsync::NO_KEY))?;
+        let video = req_id(a, "clip_id")?;
+        let audio = a.get("audio_clip_id").and_then(Value::as_u64);
+        let model = match opt_str(a, "model")? {
+            Some("fast") | None => performance::MODELS[0].0.to_string(),
+            Some("best") => performance::MODELS[1].0.to_string(),
+            Some(other) => other.to_string(),
+        };
+        let plan = performance::plan(&self.project, video, audio)?;
+        if opt_bool(a, "dry_run")?.unwrap_or(false) {
+            return Ok(text_json(&json!({
+                "start": round3(plan.start()), "end": round3(plan.end()), "model": model, "estimated_usd": (plan.estimate(&model) * 100.0).round() / 100.0,
+                "segments": plan.segments.iter().map(|s| json!({ "start": round3(s.start), "end": round3(s.end), "video_seconds": s.video_seconds(), "lyrics": s.lyrics })).collect::<Vec<_>>(),
+            })));
+        }
+        let sheet = opt_str(a, "character_sheet")?.map(PathBuf::from);
+        let opts = performance::Options { model: &model, direction: opt_str(a, "direction")?.unwrap_or(""), sheet: sheet.as_deref() };
+        let dir = crate::ai::video_gen::output_dir(self.path.as_deref()).join("lipsync");
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let results = performance::perform(&self.project, &plan, &key, &opts, &dir, &cancel, &mut |_, _| {})?.ok_or_else(|| anyhow!("cancelled"))?;
+        let ids = performance::apply(&mut self.project, &plan, results)?;
+        Ok(text_json(&json!({
+            "start": round3(plan.start()), "end": round3(plan.end()), "model": model,
+            "estimated_usd": (plan.estimate(&model) * 100.0).round() / 100.0,
+            "clips": ids.iter().map(|&id| self.clip_json_by_id(id)).collect::<Vec<_>>(),
+        })))
+    }
+
     fn ai_client(&self) -> Result<(crate::ai::openrouter::AiSettings, crate::ai::openrouter::Client)> {
         let settings = crate::ai::openrouter::AiSettings::load();
         let client = crate::ai::openrouter::Client::from_settings(&settings).map_err(|_| {
@@ -2523,6 +2555,14 @@ fn tool_definitions() -> Vec<Value> {
             "voice_clip_id": int("The dialogue clip (default: the voice clip overlapping the shot most)"),
             "model": { "type": "string", "enum": ["lipsync-2", "lipsync-2-pro"] },
         }), &["video_clip_id"], json!({ "readOnlyHint": false, "destructiveHint": false, "openWorldHint": true })),
+        tool("performance_shot", "Performance shot (Seedance 2.0 lip-sync)", "Re-generates a shot of the singer as a performance of the song: a still of the shot plus the matching song audio and lyrics go to Seedance 2.0 on fal.ai in overlapping segments of ≤14 s, and the results replace the shot on the timeline. Best lip-sync method for music videos. Paid: ≈ $0.24/s (fast) or $0.30/s (best) of generated video; use dry_run first to see segments and cost.", json!({
+            "clip_id": int("The singer's video or image clip"),
+            "audio_clip_id": int("The song/vocal clip (default: the audio overlapping the shot most)"),
+            "model": { "type": "string", "enum": ["fast", "best"] },
+            "direction": string("How they perform, e.g. 'sings with eyes closed, swaying slowly'"),
+            "character_sheet": string("Optional character sheet image path for a consistent face"),
+            "dry_run": boolean("Only plan: return segments, lyrics and estimated cost"),
+        }), &["clip_id"], json!({ "readOnlyHint": false, "destructiveHint": false, "openWorldHint": true })),
         tool("rough_cut", "Rough cut by prompt (AI)", "Makes a rough cut from instructions like '60-second highlight, keep the funny bits, cut ums and long pauses'. A video-understanding model reads the whisper transcript (≈ word timing) and watches a tiny copy of the timeline, then RustCut keeps the chosen ranges and ripple-cuts everything else across all tracks (one undo). Also returns title ideas, a YouTube description and chapters. Billed to the user's OpenRouter account (typically a few cents per minute).", json!({
             "prompt": string("What the edit should be"),
             "target_seconds": num("Desired final length in seconds (optional)"),
@@ -2578,7 +2618,7 @@ mod tests {
         assert!(s.handle_line(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#).is_none());
         let r = call(&mut s, 3, "tools/list", json!({}));
         let tools = r["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 57);
+        assert_eq!(tools.len(), 58);
         assert!(tools.iter().all(|t| t["inputSchema"]["type"] == "object"));
         assert_eq!(call(&mut s, 4, "ping", json!({}))["result"], json!({}));
     }

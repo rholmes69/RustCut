@@ -46,6 +46,9 @@ pub struct AiSettings {
     /// fal.ai key for lip-sync (FAL_KEY takes precedence) and the model to use.
     pub fal_key: Option<String>,
     pub lipsync_model: String,
+    /// true = re-generate the shot as a performance (Seedance 2.0); false = fix the mouth only.
+    pub lipsync_performance: bool,
+    pub performance_model: String,
 }
 
 impl Default for AiSettings {
@@ -64,6 +67,8 @@ impl Default for AiSettings {
             tts_usd_per_char: super::elevenlabs::DEFAULT_USD_PER_CHAR,
             fal_key: None,
             lipsync_model: "lipsync-2".into(),
+            lipsync_performance: false,
+            performance_model: super::performance::MODELS[0].0.into(),
         }
     }
 }
