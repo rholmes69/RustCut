@@ -5,6 +5,7 @@ pub mod image_gen;
 pub mod lipsync;
 pub mod local;
 pub mod performance;
+pub mod reshoot;
 pub mod music_video;
 pub mod openrouter;
 pub mod reframe;

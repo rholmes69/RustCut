@@ -294,7 +294,7 @@ impl MapPlain for TaskState<Storyboard> {
     }
 }
 
-fn thumb(app: &mut EditorApp, ui: &Ui, path: &Path) -> Option<egui::TextureId> {
+pub(crate) fn thumb(app: &mut EditorApp, ui: &Ui, path: &Path) -> Option<egui::TextureId> {
     let g = &mut app.storyboard;
     if let Some(t) = g.thumbs.get(path) {
         return Some(t.id());

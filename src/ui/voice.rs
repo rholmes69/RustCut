@@ -39,7 +39,7 @@ pub struct VoiceUi {
     perf_job: Option<Task<(crate::ai::performance::Plan, Vec<(PathBuf, crate::media::ffmpeg::ProbeInfo)>)>>,
 }
 
-fn start_performance(app: &mut EditorApp, ctx: &Context, plan: crate::ai::performance::Plan) {
+pub(crate) fn start_performance(app: &mut EditorApp, ctx: &Context, plan: crate::ai::performance::Plan) {
     let Some(k) = app.ai.settings.fal_key() else { return };
     let project = app.project.clone();
     let model = app.ai.settings.performance_model.clone();

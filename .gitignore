@@ -7,4 +7,6 @@ __pycache__/
 
 # Local machine settings
 .mcp.json
-.claude/
+# Claude Code: share project skills, keep local settings private
+.claude/*
+!.claude/skills/

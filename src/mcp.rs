@@ -177,7 +177,8 @@ impl<W: Write> Server<W> {
             "speak_line" => self.speak_line(a),
             "clone_voice" => self.clone_voice(a),
             "lip_sync" => self.lip_sync(a),
-            "performance_shot" => self.performance_shot(a),
+            "performance_shot" => self.performance_shot(a, progress),
+            "reshoot_clip" => self.reshoot_clip(a, progress),
             "set_price" => self.set_price(a),
             "generate_thumbnail" => self.generate_thumbnail(a, progress),
             "generate_still" => self.generate_still(a, progress),
@@ -1805,7 +1806,7 @@ impl<W: Write> Server<W> {
         })))
     }
 
-    fn performance_shot(&mut self, a: &Value) -> Result<Vec<Value>> {
+    fn performance_shot(&mut self, a: &Value, progress: Option<Value>) -> Result<Vec<Value>> {
         use crate::ai::performance;
         let settings = crate::ai::openrouter::AiSettings::load();
         let key = settings.fal_key().ok_or_else(|| anyhow!(crate::ai::lipsync::NO_KEY))?;
@@ -1827,13 +1828,66 @@ impl<W: Write> Server<W> {
         let opts = performance::Options { model: &model, direction: opt_str(a, "direction")?.unwrap_or(""), sheet: sheet.as_deref() };
         let dir = crate::ai::video_gen::output_dir(self.path.as_deref()).join("lipsync");
         let cancel = std::sync::atomic::AtomicBool::new(false);
-        let results = performance::perform(&self.project, &plan, &key, &opts, &dir, &cancel, &mut |_, _| {})?.ok_or_else(|| anyhow!("cancelled"))?;
+        let results = {
+            let mut notify = progress_notifier(&mut self.out, progress);
+            performance::perform(&self.project, &plan, &key, &opts, &dir, &cancel, &mut |p, s| notify(p, s))?.ok_or_else(|| anyhow!("cancelled"))?
+        };
         let ids = performance::apply(&mut self.project, &plan, results)?;
         Ok(text_json(&json!({
             "start": round3(plan.start()), "end": round3(plan.end()), "model": model,
             "estimated_usd": (plan.estimate(&model) * 100.0).round() / 100.0,
             "clips": ids.iter().map(|&id| self.clip_json_by_id(id)).collect::<Vec<_>>(),
         })))
+    }
+
+    fn reshoot_clip(&mut self, a: &Value, progress: Option<Value>) -> Result<Vec<Value>> {
+        use crate::ai::reshoot;
+        let clip = req_id(a, "clip_id")?;
+        let c = self.project.clip(clip).cloned().ok_or_else(|| anyhow!("no clip {clip}"))?;
+        let src = reshoot::find_source(&self.project, clip);
+        let description = opt_str(a, "description")?.map(str::to_string).unwrap_or_else(|| src.description());
+        let motion = opt_str(a, "motion")?.map(str::to_string).unwrap_or_else(|| src.motion());
+        let lead = opt_bool(a, "lead")?.unwrap_or(!src.no_lead());
+        let (settings, client) = self.ai_client()?;
+        let still = opt_str(a, "still")?.map(PathBuf::from);
+        let dir = match still.as_ref().and_then(|s| s.parent()) {
+            Some(d) => d.to_path_buf(),
+            None => reshoot::work_dir(self.path.as_deref(), clip),
+        };
+        let mut sb = reshoot::one_shot(&self.project, &src, &description, &motion, c.duration, !lead, &dir);
+        let mut spent = 0.0;
+        match still {
+            Some(s) => {
+                if !s.is_file() {
+                    bail!("still not found: {}", s.display());
+                }
+                sb.shots[0].frame = Some(s);
+            }
+            None => {
+                let look = if opt_bool(a, "keep_look")?.unwrap_or(true) { reshoot::current_look(&self.project, clip, &dir).ok() } else { None };
+                let (_, cost) = reshoot::draw(&client, &mut sb, &settings.image_model, look.as_deref())?;
+                spent += cost;
+            }
+        }
+        let frame = sb.shots[0].frame.clone();
+        let shot_info = json!({ "storyboard_shot": src.shot.map(|i| i + 1), "uses_of_shot": src.storyboard.as_ref().zip(src.shot).map(|(sb, i)| sb.uses(i)), "was_lip_synced": src.performance });
+        if opt_bool(a, "still_only")?.unwrap_or(false) {
+            return Ok(text_json(&json!({ "still": frame, "description": description, "motion": motion, "cost_usd": (spent * 1000.0).round() / 1000.0, "source": shot_info,
+                "hint": "Review the still, then call reshoot_clip again with still = this path to animate and replace the clip." })));
+        }
+        let models = crate::ai::video_gen::list_models(&client)?;
+        let wanted = opt_str(a, "video_model")?.map(str::to_string).unwrap_or(settings.video_model.clone());
+        let m = models.iter().find(|m| m.id == wanted && m.first_frame).or_else(|| models.iter().find(|m| m.first_frame)).cloned().ok_or_else(|| anyhow!("no image-to-video model available"))?;
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let g = {
+            let mut notify = progress_notifier(&mut self.out, progress);
+            reshoot::animate(&client, &sb, &m, &cancel, &mut |p, s| notify(p, s))?.ok_or_else(|| anyhow!("cancelled"))?
+        };
+        spent += g.cost.unwrap_or(0.0);
+        let id = reshoot::apply(&mut self.project, clip, &g.path, g.info.clone())?;
+        Ok(text_json(&json!({ "still": frame, "video": g.path, "video_model": m.id, "cost_usd": (spent * 1000.0).round() / 1000.0, "source": shot_info,
+            "clip": self.clip_json_by_id(id),
+            "hint": if src.performance { "This clip was lip-synced: run performance_shot on the new clip id to redo it." } else { "" } })))
     }
 
     fn ai_client(&self) -> Result<(crate::ai::openrouter::AiSettings, crate::ai::openrouter::Client)> {
@@ -2563,6 +2617,16 @@ fn tool_definitions() -> Vec<Value> {
             "character_sheet": string("Optional character sheet image path for a consistent face"),
             "dry_run": boolean("Only plan: return segments, lyrics and estimated cost"),
         }), &["clip_id"], json!({ "readOnlyHint": false, "destructiveHint": false, "openWorldHint": true })),
+        tool("reshoot_clip", "Reshoot one clip (AI)", "Re-generates just one cut on the timeline from a prompt: draws a new still (keeping the storyboard's style and cast, and the current shot's look unless keep_look=false), animates it and swaps it in at the same place and length. Other cuts of the same storyboard shot are untouched. Description/motion default to the storyboard shot's. Use still_only=true first to review the still (≈ $0.07), then call again with still=<path> to animate (≈ $0.14+ depending on model).", json!({
+            "clip_id": int("The clip to reshoot"),
+            "description": string("What the new shot shows (default: the storyboard shot's description)"),
+            "motion": string("Camera/subject motion (default: the storyboard shot's motion)"),
+            "keep_look": boolean("Use the current shot's frame as a look reference (default true)"),
+            "lead": boolean("The lead/cast appear in the shot (default: as in the storyboard)"),
+            "still_only": boolean("Only draw the still and return its path"),
+            "still": string("Animate this already-drawn still instead of drawing a new one"),
+            "video_model": string("Image-to-video model id (default: the one in AI settings)"),
+        }), &["clip_id"], json!({ "readOnlyHint": false, "destructiveHint": false, "openWorldHint": true })),
         tool("rough_cut", "Rough cut by prompt (AI)", "Makes a rough cut from instructions like '60-second highlight, keep the funny bits, cut ums and long pauses'. A video-understanding model reads the whisper transcript (≈ word timing) and watches a tiny copy of the timeline, then RustCut keeps the chosen ranges and ripple-cuts everything else across all tracks (one undo). Also returns title ideas, a YouTube description and chapters. Billed to the user's OpenRouter account (typically a few cents per minute).", json!({
             "prompt": string("What the edit should be"),
             "target_seconds": num("Desired final length in seconds (optional)"),
@@ -2618,7 +2682,7 @@ mod tests {
         assert!(s.handle_line(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#).is_none());
         let r = call(&mut s, 3, "tools/list", json!({}));
         let tools = r["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 58);
+        assert_eq!(tools.len(), 59);
         assert!(tools.iter().all(|t| t["inputSchema"]["type"] == "object"));
         assert_eq!(call(&mut s, 4, "ping", json!({}))["result"], json!({}));
     }

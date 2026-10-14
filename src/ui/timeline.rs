@@ -28,6 +28,7 @@ enum ClipMenu {
     Plate,
     Beats,
     LipSync,
+    Reshoot,
 }
 
 fn track_height(kind: TrackKind) -> f32 {
@@ -498,6 +499,14 @@ fn lanes(ui: &mut Ui, app: &mut EditorApp) {
                             ui.close_menu();
                         }
                         if ui
+                            .button("🎬  Reshoot this clip (AI)…")
+                            .on_hover_text("Rewrite the prompt for just this cut: draw a new still, animate it and swap it in")
+                            .clicked()
+                        {
+                            pick(ClipMenu::Reshoot);
+                            ui.close_menu();
+                        }
+                        if ui
                             .button("👄  Lip-sync to dialogue (AI)…")
                             .on_hover_text("Make the character's mouth match the voice clip over this shot (fal.ai)")
                             .clicked()
@@ -609,6 +618,7 @@ fn lanes(ui: &mut Ui, app: &mut EditorApp) {
                 }
             }
             ClipMenu::LipSync => crate::ui::voice::open_lipsync(app, id),
+            ClipMenu::Reshoot => crate::ui::reshoot::open(app, id),
             ClipMenu::Plate => crate::ui::image_gen::start(app, &ctx, crate::ai::image_gen::Job::Plate { clip: id }),
         }
     }

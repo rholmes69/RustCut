@@ -62,6 +62,7 @@ pub struct EditorApp {
     pub local: ui::local_ai::LocalAiUi,
     pub economics: ui::economics::EconomicsUi,
     pub voice: ui::voice::VoiceUi,
+    pub reshoot: ui::reshoot::ReshootUi,
     pub rough_cut: ui::rough_cut::RoughCutUi,
     pub toast: Option<Toast>,
     pub ffmpeg_ok: bool,
@@ -107,6 +108,7 @@ impl EditorApp {
             local: Default::default(),
             economics: Default::default(),
             voice: Default::default(),
+            reshoot: Default::default(),
             rough_cut: Default::default(),
             toast: None,
             ffmpeg_ok: ffmpeg::is_available(),
@@ -721,6 +723,7 @@ impl eframe::App for EditorApp {
         ui::music::poll(self);
         ui::local_ai::poll(self);
         ui::voice::poll(self);
+        ui::reshoot::poll(self, ctx);
         ui::rough_cut::poll(self);
         self.handle_shortcuts(ctx);
         self.advance_playback(ctx);
@@ -739,6 +742,7 @@ impl eframe::App for EditorApp {
         ui::local_ai::transitions_window(ctx, self);
         ui::economics::window(ctx, self);
         ui::voice::window(ctx, self);
+        ui::reshoot::window(ctx, self);
         ui::rough_cut::window(ctx, self);
 
         self.handle_dropped_files(ctx);
