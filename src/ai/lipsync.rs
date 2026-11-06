@@ -135,11 +135,33 @@ fn fal_error(e: ureq::Error) -> anyhow::Error {
     }
 }
 
+/// Uploads a file to fal.ai's storage and returns its public URL (for endpoints that no
+/// longer accept inline `data:` URIs, like Sync lipsync-2).
+pub fn upload(key: &str, path: &Path, mime: &str) -> Result<String> {
+    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    if bytes.len() > 90 * 1024 * 1024 {
+        bail!("{} is too large to upload ({} MB)", path.display(), bytes.len() / 1_000_000);
+    }
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "upload".into());
+    let agent = ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(15)).timeout(Duration::from_secs(300)).build();
+    let init: Value = agent
+        .post("https://rest.fal.ai/storage/upload/initiate?storage_type=fal-cdn-v3")
+        .set("Authorization", &format!("Key {key}"))
+        .send_json(json!({ "content_type": mime, "file_name": name }))
+        .map_err(fal_error)?
+        .into_json()?;
+    let (Some(put_url), Some(file_url)) = (init["upload_url"].as_str(), init["file_url"].as_str()) else {
+        bail!("fal.ai storage did not return an upload URL: {}", init.to_string().chars().take(200).collect::<String>());
+    };
+    agent.put(put_url).set("Content-Type", mime).send_bytes(&bytes).map_err(fal_error)?;
+    Ok(file_url.to_string())
+}
+
 /// Sends the segment and the line to fal.ai and downloads the lip-synced video into
 /// `out`. `Ok(None)` if cancelled.
 pub fn run(key: &str, video: &Path, audio: &Path, model: &str, out: &Path, cancel: &AtomicBool, progress: &mut dyn FnMut(f32, &str)) -> Result<Option<PathBuf>> {
     progress(0.05, "Uploading the shot and the line…");
-    let body = json!({ "video_url": data_uri(video, "video/mp4")?, "audio_url": data_uri(audio, "audio/wav")?, "model": model, "sync_mode": "cut_off" });
+    let body = json!({ "video_url": upload(key, video, "video/mp4")?, "audio_url": upload(key, audio, "audio/wav")?, "model": model, "sync_mode": "cut_off" });
     fal_run(key, ENDPOINT, body, out, "Lip-syncing…", cancel, progress)
 }
 
@@ -245,6 +267,33 @@ pub fn lip_sync(project: &Project, plan: &Plan, key: &str, model: &str, out_dir:
 mod tests {
     use super::*;
     use crate::model::{MediaItem, MediaKind};
+
+    /// Paid, manual: `LS_PROJECT=<.rcproj> LS_CLIP=<video clip id> [LS_VOICE=<clip id>] [LS_MODEL=lipsync-2-pro]
+    /// [LS_DRY=1] cargo test --lib lipsync_live -- --ignored --nocapture`. Saves the project
+    /// (backup: `<name>.before-lipsync.rcproj`).
+    #[test]
+    #[ignore]
+    fn lipsync_live() {
+        let Ok(path) = std::env::var("LS_PROJECT") else { return };
+        let path = PathBuf::from(path);
+        let mut p = Project::load(&path).unwrap();
+        let clip: Id = std::env::var("LS_CLIP").unwrap().parse().unwrap();
+        let voice = std::env::var("LS_VOICE").ok().and_then(|v| v.parse().ok());
+        let model = std::env::var("LS_MODEL").unwrap_or_else(|_| MODELS[0].0.into());
+        let plan = plan(&p, clip, voice).unwrap();
+        println!("span {:.2}–{:.2} with voice clip {}: estimate ${:.2} ({model})", plan.start, plan.end, plan.voice_clip, (plan.end - plan.start) * usd_per_second(&model));
+        if std::env::var("LS_DRY").is_ok() {
+            return;
+        }
+        let key = crate::ai::openrouter::AiSettings::load().fal_key().expect("fal key in RustCut settings");
+        let dir = crate::ai::video_gen::output_dir(Some(&path)).join("lipsync");
+        let (file, info) = lip_sync(&p, &plan, &key, &model, &dir, &AtomicBool::new(false), &mut |f, s| println!("  {:3.0}% {s}", f * 100.0)).unwrap().unwrap();
+        println!("got {} ({:.2} s, {}x{})", file.display(), info.duration, info.width, info.height);
+        std::fs::copy(&path, path.with_extension("before-lipsync.rcproj")).unwrap();
+        let id = apply(&mut p, &plan, &file, info).unwrap();
+        p.save(&path).unwrap();
+        println!("placed clip {id}; project saved");
+    }
 
     fn project() -> (Project, Id, Id) {
         let mut p = Project::default();
