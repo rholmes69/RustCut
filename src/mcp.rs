@@ -1446,7 +1446,7 @@ impl<W: Write> Server<W> {
             (None, Some(p)) => Some(std::fs::read_to_string(p).with_context(|| format!("reading {p}"))?),
             _ => None,
         };
-        let input = text.map_or(Input::Transcribe, Input::Text);
+        let input = text.clone().map_or(Input::Transcribe, Input::Text);
         let style = match opt_str(a, "style")? {
             Some(s) => LyricStyle::parse(s).ok_or_else(|| anyhow!("style must be karaoke, lines, big_centered, pop_words or build_up"))?,
             None => LyricStyle::Line,
@@ -1463,9 +1463,11 @@ impl<W: Write> Server<W> {
             lyrics::timed_lines(&self.project, song, &input, &language, &cancel, &mut |p, s| notify(p, s))?.ok_or_else(|| anyhow!("cancelled"))?
         };
         let n = lyrics::apply_lyrics(&mut self.project, &lines, style, y, opt_bool(a, "beat_snap")?.unwrap_or(true));
+        let sections = text.as_deref().map_or(0, |t| lyrics::apply_header_sections(&mut self.project, song, t, &lines));
         Ok(text_json(&json!({
             "lines": lines.len(),
             "clips": n,
+            "sections_from_headers": sections,
             "first_lines": lines.iter().take(6).map(|l| json!({ "start": round3(l.start), "end": round3(l.end), "text": l.text })).collect::<Vec<_>>(),
             "hint": "Lyrics are text clips on the 'Lyrics' caption track; fix any line with update_clip. export_lrc saves an .lrc file.",
         })))

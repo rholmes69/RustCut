@@ -570,10 +570,15 @@ total spent: ${:.3}", sb.dir.display(), sb.spent);
                 if let Ok(lyr) = std::env::var("MV_LYRICS") {
                     let text = std::fs::read_to_string(lyr).unwrap();
                     let t = std::time::Instant::now();
-                    let lines = crate::lyrics::timed_lines(&p, song_clip, &crate::lyrics::Input::Text(text), "en", &cancel, &mut |_, _| {}).unwrap().unwrap();
+                    let lines = crate::lyrics::timed_lines(&p, song_clip, &crate::lyrics::Input::Text(text.clone()), "en", &cancel, &mut |_, _| {}).unwrap().unwrap();
                     let style = std::env::var("MV_LYRIC_STYLE").ok().and_then(|s| crate::lyrics::LyricStyle::parse(&s)).unwrap_or(crate::lyrics::LyricStyle::Karaoke);
                     let n = crate::lyrics::apply_lyrics(&mut p, &lines, style, 0.36, false);
                     println!("lyrics: {} lines → {n} clips in {:?}", lines.len(), t.elapsed());
+                    if crate::lyrics::apply_header_sections(&mut p, song_clip, &text, &lines) > 0 {
+                        for s in &p.music[&m].sections {
+                            println!("  section {:6.1}-{:6.1} {} (energy {:.2})", s.start, s.end, s.label, s.energy);
+                        }
+                    }
                     for l in lines.iter().take(6).chain(lines.iter().rev().take(3)) {
                         println!("  [{:6.1}-{:6.1}] {}", l.start, l.end, l.text);
                     }
@@ -679,6 +684,29 @@ total spent: ${:.3}", sb.dir.display(), sb.spent);
             }
             other => panic!("unknown stage {other}"),
         }
+    }
+
+    #[test]
+    fn lyric_headers_set_the_sections_of_a_loud_song() {
+        let (mut p, song) = song_project();
+        // Loud from start to end: the loudness analysis calls the whole song a chorus.
+        let media = p.clip(song).unwrap().media_id().unwrap();
+        p.music.get_mut(&media).unwrap().sections = vec![Section { start: 0.0, end: 80.0, label: "chorus".into(), energy: 1.0 }];
+        assert!(plan_slots(&p, 0.0, 80.0).iter().all(|d| d.section == "chorus"));
+        let o = outline(&p, song, (0.0, 80.0), 10).unwrap();
+        assert!(o.shot_of.windows(2).all(|w| w[1] == (w[0] + 1) % o.shots), "one pool: the story just cycles");
+
+        let text = "[Intro]\nHere we go\n[Verse 1]\nFirst verse line\nSecond verse line\n[Chorus]\nHook line one\nHook line two\n[Verse 2]\nThird verse line\n[Chorus]\nHook line three\n";
+        let l = |t: &str, a: f64, b: f64| crate::lyrics::Line { text: t.into(), start: a, end: b, words: crate::lyrics::spread_words(t, a, b) };
+        let lines = [l("Here we go", 4.0, 8.0), l("First verse line", 16.0, 22.0), l("Second verse line", 22.0, 30.0), l("Hook line one", 32.0, 40.0), l("Hook line two", 40.0, 46.0), l("Third verse line", 48.0, 62.0), l("Hook line three", 64.0, 78.0)];
+        assert_eq!(crate::lyrics::apply_header_sections(&mut p, song, text, &lines), 5);
+        let d = plan_slots(&p, 0.0, 80.0);
+        let label_at = |t: f64| d.iter().find(|s| s.start <= t && t < s.end).map(|s| s.section.as_str());
+        assert_eq!([label_at(1.0), label_at(20.0), label_at(40.0), label_at(55.0), label_at(70.0)], [Some("intro"), Some("verse"), Some("chorus"), Some("verse"), Some("chorus")]);
+        let o = outline(&p, song, (0.0, 80.0), 10).unwrap();
+        let shots_in = |a: f64, b: f64| o.drafts.iter().zip(&o.shot_of).filter(|(s, _)| s.start >= a && s.start < b).map(|(_, &n)| n).collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(shots_in(16.0, 32.0), shots_in(48.0, 64.0), "the second verse reuses the verse shots");
+        assert!(shots_in(16.0, 32.0).is_disjoint(&shots_in(32.0, 48.0)), "verses and choruses get their own shots");
     }
 
     #[test]

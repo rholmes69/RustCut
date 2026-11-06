@@ -147,7 +147,10 @@ pub fn poll(app: &mut EditorApp) {
         match state {
             TaskState::Done(lines) => {
                 let n = crate::lyrics::apply_lyrics(&mut app.project, &lines, app.music.lyric_style, app.music.lyric_pos, app.music.lyric_beat_snap);
-                app.notify(format!("🎤 {} lyric lines added ({n} clips) on the Lyrics track — edit any of them like text", lines.len()));
+                let text = app.music.lyrics_text.clone();
+                let sections = crate::multicam::song_clip(&app.project).map_or(0, |song| crate::lyrics::apply_header_sections(&mut app.project, song, &text, &lines));
+                let note = if sections > 0 { format!("; song sections set from its {sections} lyric headers") } else { String::new() };
+                app.notify(format!("🎤 {} lyric lines added ({n} clips) on the Lyrics track — edit any of them like text{note}", lines.len()));
             }
             TaskState::Failed(e) => app.notify_error(format!("Lyrics: {e}")),
             _ => {}

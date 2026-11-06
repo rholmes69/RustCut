@@ -139,13 +139,141 @@ pub fn parse_lrc(text: &str) -> Option<Vec<Line>> {
 
 /// Lines of plain lyrics, without section tags like `[Chorus]` or `(x2)` and blank lines.
 pub fn plain_lines(text: &str) -> Vec<String> {
-    text.lines()
-        .map(str::trim)
-        // Section tags ([Chorus]) and lines that are only a bracketed note or ad-lib.
-        .filter(|l| !l.is_empty() && !(l.starts_with('[') && l.ends_with(']')) && !(l.starts_with('(') && l.ends_with(')')))
-        .map(strip_repeat_mark)
-        .filter(|l| !l.is_empty())
-        .collect()
+    text.lines().filter_map(lyric_line).collect()
+}
+
+/// A sung line of pasted lyrics, or `None` for blank lines, section tags ([Chorus]) and
+/// lines that are only a bracketed note or ad-lib.
+fn lyric_line(raw: &str) -> Option<String> {
+    let l = raw.trim();
+    if l.is_empty() || (l.starts_with('[') && l.ends_with(']')) || (l.starts_with('(') && l.ends_with(')')) {
+        return None;
+    }
+    Some(strip_repeat_mark(l)).filter(|l| !l.is_empty())
+}
+
+/// The kind of song section a lyric header names: "[Verse 2]" → verse, "[Pre-Chorus]" →
+/// pre-chorus, "[Intro - (Piano)]" → intro, "[Piano solo]" → break. `None` if it isn't a header.
+pub fn section_label(header: &str) -> Option<&'static str> {
+    let h = header.trim();
+    let h = h.strip_prefix('[')?.strip_suffix(']')?.to_lowercase().replace(['-', '_'], " ");
+    let has = |w: &str| h.contains(w);
+    Some(if has("pre chorus") || has("prechorus") || has("pre hook") {
+        "pre-chorus"
+    } else if has("post chorus") {
+        "post-chorus"
+    } else if has("chorus") || has("hook") || has("refrain") {
+        "chorus"
+    } else if has("verse") {
+        "verse"
+    } else if has("bridge") {
+        "bridge"
+    } else if has("intro") {
+        "intro"
+    } else if has("outro") || has("coda") || has("ending") {
+        "outro"
+    } else if has("solo") || has("instrumental") || has("interlude") || has("break") || has("drop") {
+        "break"
+    } else {
+        return None;
+    })
+}
+
+/// The section label of each line [`plain_lines`] returns, in the same order; `None` for
+/// lines before the first recognised header.
+pub fn line_sections(text: &str) -> Vec<Option<&'static str>> {
+    let mut current = None;
+    let mut out = Vec::new();
+    for raw in text.lines() {
+        if let Some(label) = section_label(raw) {
+            current = Some(label);
+        } else if lyric_line(raw).is_some() {
+            out.push(current);
+        }
+    }
+    out
+}
+
+/// Song sections from the lyrics' headers, in song time. Each section starts where its first
+/// line is sung (the first one at 0) and lasts until the next; an instrumental gap of more
+/// than [`BREAK_GAP`] seconds between two sections becomes a break. Energy comes from the
+/// overlapping `audio` sections (the loudness analysis). Lines before the first header count
+/// as verse. `None` unless the lines match the text (aligned pasted lyrics, not an `.lrc` or a
+/// transcript) and they make at least two sections.
+pub fn sections_from_headers(text: &str, lines: &[Line], audio: &[crate::music::Section], song_len: f64) -> Option<Vec<crate::music::Section>> {
+    let labels = line_sections(text);
+    if labels.len() != lines.len() || labels.iter().all(Option::is_none) {
+        return None;
+    }
+    // (label, first line start, last line end) per run of lines with the same header.
+    let mut runs: Vec<(&str, f64, f64)> = Vec::new();
+    for (label, line) in labels.iter().map(|l| l.unwrap_or("verse")).zip(lines) {
+        match runs.last_mut() {
+            Some(r) if r.0 == label => r.2 = r.2.max(line.end),
+            _ => runs.push((label, line.start, line.end)),
+        }
+    }
+    if runs.len() < 2 {
+        return None;
+    }
+    let energy = |a: f64, b: f64| -> f32 {
+        let (mut sum, mut len) = (0.0, 0.0);
+        for s in audio {
+            let o = s.end.min(b) - s.start.max(a);
+            if o > 0.0 {
+                sum += s.energy as f64 * o;
+                len += o;
+            }
+        }
+        if len > 0.0 { (sum / len) as f32 } else { 0.6 }
+    };
+    let mut out: Vec<crate::music::Section> = Vec::new();
+    for (k, &(label, first, last)) in runs.iter().enumerate() {
+        let start = if k == 0 { 0.0 } else { first.max(out.last().map_or(0.0, |s| s.start + 0.5)) };
+        if let Some(prev) = out.last_mut() {
+            prev.end = start;
+        }
+        let end = runs.get(k + 1).map_or(song_len, |n| n.1).max(start + 0.5);
+        out.push(crate::music::Section { start, end, label: label.to_string(), energy: 0.0 });
+        // A long stretch without singing before the next section (a solo or instrumental).
+        if let Some(next) = runs.get(k + 1) {
+            if next.1 - last > BREAK_GAP && last > start {
+                out.last_mut().unwrap().end = last + 1.0;
+                out.push(crate::music::Section { start: last + 1.0, end: next.1, label: "break".into(), energy: 0.0 });
+            }
+        }
+    }
+    if let Some(s) = out.last_mut() {
+        s.end = s.end.max(song_len);
+    }
+    for s in &mut out {
+        s.energy = energy(s.start, s.end);
+    }
+    Some(out)
+}
+
+/// Seconds without a sung line between two sections that count as an instrumental break.
+pub const BREAK_GAP: f64 = 8.0;
+
+/// When the pasted lyrics have section headers, replaces the song's loudness-guessed
+/// sections with them (keeping the measured energy), so music-video planning, the ruler and
+/// section-based tools follow the real song structure. `lines` are in timeline time, as
+/// [`timed_lines`] returns them. Returns how many sections were set (0 = unchanged).
+pub fn apply_header_sections(project: &mut Project, song_clip: crate::model::Id, text: &str, lines: &[Line]) -> usize {
+    let Some(clip) = project.clip(song_clip).cloned() else { return 0 };
+    let Some(media) = clip.media_id() else { return 0 };
+    let Some(song_len) = project.media(media).map(|m| m.duration) else { return 0 };
+    let mut song_lines = lines.to_vec();
+    to_song_time(&mut song_lines, clip.start, clip.source_in, clip.speed);
+    let Some(analysis) = project.music.get_mut(&media) else { return 0 };
+    match sections_from_headers(text, &song_lines, &analysis.sections, song_len) {
+        Some(sections) => {
+            let n = sections.len();
+            analysis.sections = sections;
+            n
+        }
+        None => 0,
+    }
 }
 
 /// Removes a trailing repeat mark such as "(x2)", "x2" or "×3"; keeps backing vocals like "(one by one)".
@@ -691,6 +819,76 @@ mod tests {
         for l in lines.iter().take(12) {
             println!("  [{:6.2}–{:6.2}] {}", l.start, l.end, l.text);
         }
+    }
+
+    fn line(text: &str, start: f64, end: f64) -> Line {
+        Line { text: text.into(), start, end, words: spread_words(text, start, end) }
+    }
+
+    #[test]
+    fn reads_section_headers() {
+        assert_eq!(section_label("[Intro - (Piano & Percussion)]"), Some("intro"));
+        assert_eq!(section_label("[Verse 2]"), Some("verse"));
+        assert_eq!(section_label("[Pre-Chorus]"), Some("pre-chorus"));
+        assert_eq!(section_label("[Chorus]"), Some("chorus"));
+        assert_eq!(section_label("[Hook]"), Some("chorus"));
+        assert_eq!(section_label("[Bridge]"), Some("bridge"));
+        assert_eq!(section_label("[piano solo]"), Some("break"));
+        assert_eq!(section_label("[Outro]"), Some("outro"));
+        assert_eq!(section_label("[Aishyla]"), None, "a singer tag is not a section");
+        assert_eq!(section_label("Chorus"), None);
+        let text = "Before any header\n[Verse 1]\nLine one\n(ooh)\n\n[Chorus]\nSing it (x2)\n[piano solo]\n[Bridge]\nQuiet now\n";
+        assert_eq!(line_sections(text), [None, Some("verse"), Some("chorus"), Some("bridge")]);
+        assert_eq!(line_sections(text).len(), plain_lines(text).len(), "one label per sung line");
+    }
+
+    #[test]
+    fn sections_follow_the_lyric_headers() {
+        use crate::music::Section;
+        let text = "[Intro]\nYeah\n[Verse 1]\nA\nB\n[Chorus]\nC\nD\n[Verse 2]\nE\n[Chorus]\nF\n[Outro]\nG\n";
+        // The chorus ends at 40 and the second verse starts at 55: a 15 s solo between them.
+        let lines = [line("Yeah", 6.0, 8.0), line("A", 12.0, 15.0), line("B", 15.0, 26.0), line("C", 30.0, 34.0), line("D", 34.0, 40.0), line("E", 55.0, 60.0), line("F", 64.0, 76.0), line("G", 80.0, 84.0)];
+        // A loud song: the loudness analysis calls everything after 10 s a chorus.
+        let audio = [Section { start: 0.0, end: 10.0, label: "intro".into(), energy: 0.4 }, Section { start: 10.0, end: 90.0, label: "chorus".into(), energy: 0.9 }];
+        let s = sections_from_headers(text, &lines, &audio, 90.0).unwrap();
+        let got: Vec<(f64, f64, &str)> = s.iter().map(|s| (s.start, s.end, s.label.as_str())).collect();
+        assert_eq!(got, [(0.0, 12.0, "intro"), (12.0, 30.0, "verse"), (30.0, 41.0, "chorus"), (41.0, 55.0, "break"), (55.0, 64.0, "verse"), (64.0, 80.0, "chorus"), (80.0, 90.0, "outro")]);
+        assert!((s[0].energy - (0.4 * 10.0 + 0.9 * 2.0) as f32 / 12.0).abs() < 1e-5, "energy from the loudness analysis: {}", s[0].energy);
+        assert!((s[2].energy - 0.9).abs() < 1e-5);
+        // Not usable: lines that don't match the text (an .lrc or a transcript), or no headers.
+        assert!(sections_from_headers(text, &lines[..5], &audio, 90.0).is_none());
+        assert!(sections_from_headers("A\nB\n", &lines[..2], &audio, 90.0).is_none());
+        assert!(sections_from_headers("[Chorus]\nA\nB\n", &lines[..2], &audio, 90.0).is_none(), "one section says nothing");
+    }
+
+    #[test]
+    fn header_sections_replace_the_analysis_in_song_time() {
+        use crate::model::{MediaItem, MediaKind};
+        use crate::music::{MusicAnalysis, Section};
+        let mut p = Project::default();
+        let song = p.add_media(MediaItem { id: 0, path: "song.wav".into(), name: "song.wav".into(), kind: MediaKind::Audio, duration: 60.0, width: 0, height: 0, fps: 0.0, has_audio: true });
+        p.music.insert(song, MusicAnalysis {
+            bpm: 120.0,
+            beats: vec![],
+            first_downbeat: 0,
+            beats_per_bar: 4,
+            sections: vec![Section { start: 0.0, end: 60.0, label: "chorus".into(), energy: 1.0 }],
+            beat_energy: vec![],
+        });
+        // The song starts 2 s into the timeline and is trimmed by 1 s: song time = timeline - 1.
+        let mut c = p.new_media_clip(song, 2.0).unwrap();
+        c.start = 2.0;
+        c.source_in = 1.0;
+        c.duration = 59.0;
+        let id = c.id;
+        p.place_clip(c, None);
+        let text = "[Verse 1]\nA\n[Chorus]\nB\n";
+        let lines = [line("A", 11.0, 26.0), line("B", 31.0, 35.0)];
+        assert_eq!(apply_header_sections(&mut p, id, text, &lines), 2);
+        let got: Vec<(f64, f64, &str)> = p.music[&song].sections.iter().map(|s| (s.start, s.end, s.label.as_str())).collect();
+        assert_eq!(got, [(0.0, 30.0, "verse"), (30.0, 60.0, "chorus")]);
+        assert_eq!(apply_header_sections(&mut p, id, "A\nB\n", &lines), 0, "no headers: the analysis stays");
+        assert_eq!(p.music[&song].sections.len(), 2);
     }
 
     #[test]

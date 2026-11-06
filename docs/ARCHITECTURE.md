@@ -116,7 +116,7 @@ continuity, then beat timing) and mapped to a `Transition`.
 `music.rs`: mono 11 kHz decode → 1024-point FFT (hop 256) → spectral flux (all bands and < 150 Hz) and RMS →
 tempo from the onset autocorrelation (log-Gaussian prior at 120 BPM, double-lag bonus) → beats by dynamic
 programming → downbeat phase with the most bass onsets → sections where per-bar loudness changes (snapped to
-4-bar phrases). Analyses live in `Project.music` (per media id) and are mapped onto the timeline through the song
+4-bar phrases). When pasted lyrics have section headers (`[Verse 1]`, `[Pre-Chorus]`, `[Bridge]`…), `lyrics::apply_header_sections` replaces those loudness-guessed sections with the headers' sections, timed by the aligned lines (instrumental gaps over 8 s become a break; energy is kept from the loudness analysis), so songs that are loud throughout still get a real structure. Analyses live in `Project.music` (per media id) and are mapped onto the timeline through the song
 clip, feeding the ruler, snapping, `beat_montage` and `apply_beat_effect`. `multicam.rs` cross-correlates onset
 envelopes with an FFT to place takes ("Cam N" tracks, `Track.angle`) and builds a `Track.multicam` edit from switch
 points. `lyrics.rs` parses enhanced LRC, aligns plain lyrics to whisper words by edit-distance DP and lays out
