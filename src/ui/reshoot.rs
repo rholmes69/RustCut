@@ -26,7 +26,16 @@ pub struct ReshootUi {
     sb: Option<Storyboard>,
     spent: f64,
     draw_job: Option<Task<(Storyboard, f64)>>,
-    animate_job: Option<Task<Generated>>,
+    animate_job: Option<Task<Animated>>,
+    /// Video models that refused the current still, and the latest reason.
+    refused: Vec<String>,
+    refusal: Option<String>,
+}
+
+enum Animated {
+    Done(Generated),
+    /// The model refused (or failed on) the still; another model may accept it.
+    Refused { model: String, reason: String },
 }
 
 /// Opens the window for `clip` (from the timeline's right-click menu).
@@ -76,7 +85,20 @@ fn start_animate(app: &mut EditorApp, ctx: &Context, m: VideoModel) {
     let Some(mut sb) = app.reshoot.sb.clone() else { return };
     // Motion may have been edited after drawing.
     sb.shots[0].motion = app.reshoot.motion.trim().to_string();
-    app.reshoot.animate_job = Some(Task::spawn(ctx.clone(), move |cancel, report| reshoot::animate(&Client::new(key), &sb, &m, cancel, report)));
+    app.reshoot.refusal = None;
+    app.reshoot.animate_job = Some(Task::spawn(ctx.clone(), move |cancel, report| match reshoot::animate(&Client::new(key), &sb, &m, cancel, report) {
+        Ok(g) => Ok(g.map(Animated::Done)),
+        Err(e) => match reshoot::refusal(&e) {
+            Some(f) => Ok(Some(Animated::Refused { model: f.model.clone(), reason: f.reason.clone() })),
+            None => Err(e),
+        },
+    }));
+}
+
+/// Makes `id` the video model (saved, like the other model pickers).
+fn set_video_model(app: &mut EditorApp, id: &str) {
+    app.ai.settings.video_model = id.to_string();
+    let _ = app.ai.settings.save();
 }
 
 pub fn poll(app: &mut EditorApp, ctx: &Context) {
@@ -86,6 +108,9 @@ pub fn poll(app: &mut EditorApp, ctx: &Context) {
             TaskState::Done((sb, cost)) => {
                 app.reshoot.spent += cost;
                 app.reshoot.sb = Some(sb);
+                // A new still gets a fresh chance with every model.
+                app.reshoot.refused.clear();
+                app.reshoot.refusal = None;
             }
             TaskState::Failed(e) => app.notify_error(format!("Reshoot: {e}")),
             _ => {}
@@ -95,7 +120,13 @@ pub fn poll(app: &mut EditorApp, ctx: &Context) {
         app.reshoot.animate_job = None;
         let Some(clip) = app.reshoot.clip else { return };
         match state {
-            TaskState::Done(g) => match reshoot::apply(&mut app.project, clip, &g.path, g.info.clone()) {
+            TaskState::Done(Animated::Refused { model, reason }) => {
+                if !app.reshoot.refused.contains(&model) {
+                    app.reshoot.refused.push(model);
+                }
+                app.reshoot.refusal = Some(reason);
+            }
+            TaskState::Done(Animated::Done(g)) => match reshoot::apply(&mut app.project, clip, &g.path, g.info.clone()) {
                 Ok(id) => {
                     if let Some(m) = app.project.clip(id).and_then(|c| c.media_id()).and_then(|m| app.project.media(m)).cloned() {
                         app.assets.ensure(&m);
@@ -231,10 +262,46 @@ pub fn window(ctx: &Context, app: &mut EditorApp) {
                     ui.spinner();
                     return;
                 };
-                let est = reshoot::estimate_animation(&sb, &m).map_or("price on openrouter.ai".to_string(), |c| format!("≈ ${c:.2}"));
-                ui.label(widgets::dim(format!("Video model: {}", m.id)).small());
+                let price = |x: &VideoModel| reshoot::estimate_animation(&sb, x).map_or("price on openrouter.ai".to_string(), |c| format!("≈ ${c:.2}"));
+                ui.horizontal(|ui| {
+                    ui.label("Video model");
+                    egui::ComboBox::from_id_salt("reshoot-vmodel").selected_text(&m.id).width(330.0).show_ui(ui, |ui| {
+                        for x in &models {
+                            let refused = app.reshoot.refused.contains(&x.id);
+                            let mark = if refused { "✖ " } else { "" };
+                            let item = ui.selectable_label(x.id == m.id, format!("{mark}{}  ·  {}", x.id, price(x)));
+                            let item = if refused { item.on_hover_text("Refused this still") } else { item };
+                            if item.clicked() {
+                                set_video_model(app, &x.id);
+                            }
+                        }
+                    });
+                });
+
+                if let Some(reason) = app.reshoot.refusal.clone() {
+                    let who = app.reshoot.refused.last().cloned().unwrap_or_default();
+                    ui.add_space(4.0);
+                    ui.label(RichText::new(format!("✖ {who} refused this still: {reason}")).color(theme::DANGER).small());
+                    match reshoot::next_model(&sb, &models, &app.reshoot.refused).cloned() {
+                        Some(next) => {
+                            if ui.button(format!("↻ Try again with {} ({})", next.id, price(&next))).on_hover_text("Same still, a model with a different content filter").clicked() {
+                                set_video_model(app, &next.id);
+                                start_animate(app, ui.ctx(), next);
+                                return;
+                            }
+                        }
+                        None => {
+                            ui.label(RichText::new("Every image-to-video model has refused this still.").color(theme::DANGER).small());
+                        }
+                    }
+                    ui.label(widgets::dim("Or redraw the still with a changed description (e.g. more covering clothing).").small());
+                    ui.add_space(4.0);
+                }
+
                 let w = ui.available_width();
-                if ui.add(Button::new(RichText::new(format!("🎬 Animate & replace this clip ({est})")).strong().color(Color32::BLACK)).fill(theme::ACCENT).min_size(egui::vec2(w, 30.0))).clicked() {
+                let button = ui.add(Button::new(RichText::new(format!("🎬 Animate & replace this clip ({})", price(&m))).strong().color(Color32::BLACK)).fill(theme::ACCENT).min_size(egui::vec2(w, 30.0)));
+                let button = if app.reshoot.refused.contains(&m.id) { button.on_hover_text(format!("{} already refused this still", m.id)) } else { button };
+                if button.clicked() {
                     start_animate(app, ui.ctx(), m);
                 }
             }

@@ -242,6 +242,27 @@ pub struct Generated {
     pub job_id: String,
 }
 
+/// The provider ran the job but it failed — often a content filter refusing the input
+/// image. Another model may accept the same request.
+#[derive(Debug)]
+pub struct JobFailed {
+    pub model: String,
+    pub state: String,
+    pub reason: String,
+}
+
+impl std::fmt::Display for JobFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} {}: {}. Models differ in what they accept (e.g. photos of realistic people); try another model.",
+            self.model, self.state, self.reason
+        )
+    }
+}
+
+impl std::error::Error for JobFailed {}
+
 /// Submits a job, waits for it and downloads the result into `dir`. `Ok(None)` if
 /// cancelled (the job may still finish and be billed on OpenRouter).
 pub fn generate(
@@ -275,11 +296,8 @@ pub fn generate(
                 break (urls, status["usage"]["cost"].as_f64());
             }
             "failed" | "cancelled" | "expired" => {
-                let err = status["error"].as_str().unwrap_or("no details");
-                bail!(
-                    "{} {state}: {err}. Models differ in what they accept (e.g. photos of realistic people); try another model.",
-                    req.model
-                );
+                let reason = status["error"].as_str().unwrap_or("no details").to_string();
+                return Err(JobFailed { model: req.model.clone(), state: state.to_string(), reason }.into());
             }
             "pending" => progress(0.05, &format!("Queued… {secs:.0}s")),
             _ => progress((0.08 + 0.82 * secs / expected).min(0.9), &format!("Generating… {secs:.0}s")),

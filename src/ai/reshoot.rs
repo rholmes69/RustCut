@@ -154,6 +154,29 @@ pub fn estimate_animation(sb: &Storyboard, m: &VideoModel) -> Option<f64> {
     storyboard::estimate_video_cost(sb, &[0], m, false).map(|(c, _)| c)
 }
 
+/// The provider's refusal (or failure) of the job, if that is why animating failed.
+pub fn refusal(e: &anyhow::Error) -> Option<&video_gen::JobFailed> {
+    e.downcast_ref()
+}
+
+fn vendor(id: &str) -> &str {
+    id.split('/').next().unwrap_or(id)
+}
+
+/// A model to retry with after the `tried` ones refused the still: the cheapest
+/// image-to-video model, preferring other vendors (their content filters differ).
+pub fn next_model<'a>(sb: &Storyboard, models: &'a [VideoModel], tried: &[String]) -> Option<&'a VideoModel> {
+    models
+        .iter()
+        .filter(|m| m.first_frame && m.generates() && !tried.contains(&m.id))
+        .filter_map(|m| {
+            let same_vendor = tried.iter().any(|t| vendor(t) == vendor(&m.id));
+            estimate_animation(sb, m).map(|c| (m, same_vendor, c))
+        })
+        .min_by(|a, b| (a.1, a.2).partial_cmp(&(b.1, b.2)).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(m, ..)| m)
+}
+
 /// Swaps the new footage in for `clip`: same place, length (or shorter if the
 /// generated clip is), look and volume.
 pub fn apply(project: &mut Project, clip: Id, path: &Path, info: ProbeInfo) -> Result<Id> {
@@ -213,6 +236,41 @@ mod tests {
         assert_eq!(one.style, "moody neon", "keeps the storyboard's look");
         assert!(one.slots.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn retries_with_another_vendor_first() {
+        let models = video_gen::parse_models(&serde_json::json!({ "data": [
+            { "id": "google/veo-3.1-lite", "supported_durations": [4, 6, 8], "supported_resolutions": ["720p"],
+              "supported_aspect_ratios": ["16:9"], "supported_frame_images": ["first_frame"],
+              "pricing_skus": { "duration_seconds_without_audio_720p": "0.03" } },
+            { "id": "google/veo-3.1", "supported_durations": [4, 6, 8], "supported_resolutions": ["720p"],
+              "supported_aspect_ratios": ["16:9"], "supported_frame_images": ["first_frame"],
+              "pricing_skus": { "duration_seconds_without_audio_720p": "0.04" } },
+            { "id": "x-ai/grok-imagine-video-1.5-lite", "supported_durations": [4, 5], "supported_resolutions": ["720p"],
+              "supported_aspect_ratios": ["16:9"], "supported_frame_images": ["first_frame"],
+              "pricing_skus": { "cents_per_video_output_second_720p": "4" } },
+            { "id": "alibaba/wan-2.6", "supported_durations": [5, 10], "supported_resolutions": ["720p"],
+              "supported_aspect_ratios": ["16:9"], "supported_frame_images": ["first_frame"],
+              "pricing_skus": { "image_to_video_duration_seconds_720p": "0.10" } },
+            { "id": "acme/text-only", "supported_durations": [4], "supported_resolutions": ["720p"],
+              "supported_aspect_ratios": ["16:9"], "pricing_skus": { "duration_seconds_720p": "0.01" } }
+        ]}));
+        let sb = one_shot(&Project::default(), &Source::default(), "beach walk", "", 4.0, false, Path::new("."));
+        let pick = |tried: &[&str]| next_model(&sb, &models, &tried.iter().map(|s| s.to_string()).collect::<Vec<_>>()).map(|m| m.id.clone());
+        assert_eq!(pick(&[]).as_deref(), Some("google/veo-3.1-lite"), "cheapest image-to-video model");
+        assert_eq!(pick(&["google/veo-3.1-lite"]).as_deref(), Some("x-ai/grok-imagine-video-1.5-lite"), "skips Google's other model");
+        assert_eq!(pick(&["google/veo-3.1-lite", "x-ai/grok-imagine-video-1.5-lite", "alibaba/wan-2.6"]).as_deref(), Some("google/veo-3.1"));
+        assert_eq!(pick(&["google/veo-3.1-lite", "google/veo-3.1", "x-ai/grok-imagine-video-1.5-lite", "alibaba/wan-2.6"]), None);
+    }
+
+    #[test]
+    fn recognises_refusals() {
+        let refused: anyhow::Error = video_gen::JobFailed { model: "google/veo-3.1-lite".into(), state: "failed".into(), reason: "violates usage guidelines".into() }.into();
+        let refused = refused.context("animating");
+        assert_eq!(refusal(&refused).map(|f| f.model.as_str()), Some("google/veo-3.1-lite"));
+        assert!(format!("{refused:#}").contains("try another model"));
+        assert!(refusal(&anyhow!("network down")).is_none());
     }
 
     #[test]
