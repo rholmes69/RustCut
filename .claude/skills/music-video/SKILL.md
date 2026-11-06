@@ -42,7 +42,8 @@ with `D="C:/Users/sales/Videos/RustCut AI/<Title> music video"`.
 4. **Character sheets for new characters (paid, ask first):** `MV_STAGE=sheet MV_SHEET_NAME=<Name> MV_SHEET_PROMPT="<age, ethnicity, hair, build, outfit>"` writes `$D/<name>-character-sheet.png`. Show it to the user.
 5. **Write `theme.txt`:** the concept, the look (e.g. night scenes cold and fluorescent, flashbacks warm and golden), the characters, and the story mapped to the song's sections. Name cast members exactly as in `MV_CAST` in the scenes they appear in, because a shot only gets a person's photo when its description names them. Spell out the emotional beats the user asked for.
 6. **Estimate and get approval** for the sheets, plan and stills.
-7. **plan (paid):** `MV_STAGE=plan MV_SHOTS=<n> MV_CAST="Aishyla=$D/aishyla-reference.png;Name=$D/name-character-sheet.png" MV_THEME="$(cat "$D/theme.txt")"`. This also draws every still.
+7. **Choose the shot mode.** For a narrative idea or a timed treatment, use `MV_MODE=story`: story shots run in song order, each over its own stretch, with about a quarter of the shots as recurring performance setups. The default (`sections`) reuses a section's shots in its repeats (2nd chorus…), which suits performance videos but makes a story go backwards. Preview the cut plan for free with `MV_STAGE=outline MV_SHOTS=<n> MV_MODE=story` (it prints the shot list the text model will get).
+   **plan (paid):** `MV_STAGE=plan MV_SHOTS=<n> MV_MODE=<story|sections> MV_CAST="Aishyla=$D/aishyla-reference.png;Name=$D/name-character-sheet.png" MV_THEME="$(cat "$D/theme.txt")"`. This also draws every still.
 8. **Contact sheet:**
    ```bash
    cd "$D/music-video-<slug>" && ffmpeg -hide_banner -loglevel error -y -start_number 1 -i shot-%02d.png -vf "scale=480:-2,drawtext=fontfile='C\:/Windows/Fonts/arialbd.ttf':text='%{eif\:n+1\:d}':x=10:y=10:fontsize=36:fontcolor=yellow:box=1:boxcolor=black@0.6,tile=4x6:padding=4" -frames:v 1 ../preview-sheet.jpg

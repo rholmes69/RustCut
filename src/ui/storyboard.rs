@@ -66,6 +66,8 @@ pub struct StoryboardUi {
     /// Whole song (false) or its best 30 seconds (true).
     best30: bool,
     max_shots: usize,
+    /// Shots tell a story in song order (with recurring performance shots) instead of repeating per section.
+    story_order: bool,
     /// Photo of the lead character for every frame.
     character: Option<PathBuf>,
 }
@@ -86,6 +88,7 @@ impl Default for StoryboardUi {
             music_video: false,
             best30: false,
             max_shots: 10,
+            story_order: false,
             character: None,
         }
     }
@@ -114,6 +117,7 @@ fn start_plan(app: &mut EditorApp, ctx: &Context) {
         let mut project = app.project.clone();
         project.aspect = app.storyboard.aspect;
         let (theme, max_shots, best30) = (app.storyboard.brief.clone(), app.storyboard.max_shots, app.storyboard.best30);
+        let mode = if app.storyboard.story_order { crate::ai::music_video::ShotMode::Story } else { crate::ai::music_video::ShotMode::Sections };
         let character = app.storyboard.character.clone();
         let model = app.ai.settings.edit_model.clone();
         let root = out_root(app);
@@ -127,7 +131,7 @@ fn start_plan(app: &mut EditorApp, ctx: &Context) {
             let clip = project.clip(song).cloned().ok_or_else(|| anyhow::anyhow!("the song clip was removed"))?;
             let range = if best30 { crate::ai::music_video::best_window(&project, 30.0).unwrap_or((clip.start, clip.end())) } else { (clip.start, clip.end()) };
             report(0.3, "Directing the shots…");
-            let mut sb = crate::ai::music_video::plan(&Client::new(key), &model, &theme, &project, song, range, max_shots, &root)?;
+            let mut sb = crate::ai::music_video::plan(&Client::new(key), &model, &theme, &project, song, range, max_shots, mode, &root)?;
             if sb.fresh_analysis.is_none() {
                 sb.fresh_analysis = media.and_then(|m| project.music.get(&m).cloned().map(|a| (m, a)));
             }
@@ -368,6 +372,9 @@ fn brief_stage(ui: &mut Ui, app: &mut EditorApp) {
             ui.label("Unique shots");
             ui.add(egui::DragValue::new(&mut g.max_shots).range(3..=24))
                 .on_hover_text("New shots to generate; repeated sections (2nd chorus…) reuse them, like real music videos");
+            ui.add_space(12.0);
+            ui.checkbox(&mut g.story_order, "Story order")
+                .on_hover_text("For a narrative idea or treatment: the story shots play in song order, each over its own stretch (no repeats), with a few performance shots of the artist cut in throughout");
         } else {
             ui.label("Length");
             egui::ComboBox::from_id_salt("sb-len").selected_text(format!("{} s", g.seconds)).show_ui(ui, |ui| {

@@ -88,6 +88,63 @@ pub fn plan_slots(project: &Project, from: f64, to: f64) -> Vec<SlotDraft> {
     out
 }
 
+/// How shots are shared out over the cuts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ShotMode {
+    /// Each kind of section gets its own shots; repeats (the 2nd chorus…) reuse them.
+    #[default]
+    Sections,
+    /// A story told in order: each story shot covers its own stretch of the song, and a
+    /// few performance shots of the artist recur in between, throughout.
+    Story,
+}
+
+impl ShotMode {
+    pub fn parse(s: &str) -> Option<ShotMode> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "sections" | "section" | "repeat" => Some(ShotMode::Sections),
+            "story" | "narrative" => Some(ShotMode::Story),
+            _ => None,
+        }
+    }
+}
+
+/// [`ShotMode::Story`]: returns (shot per slot, shots, story shots). Story shots
+/// `0..story` run in song order, each over its own stretch; performance shots `story..`
+/// take every 2nd cut in choruses and every 3rd elsewhere (never a break, the first or the
+/// last cut) and cycle through the whole song. Small budgets (< 6) are all story.
+pub fn assign_story(drafts: &[SlotDraft], max_shots: usize) -> (Vec<usize>, usize, usize) {
+    let n = drafts.len();
+    if n == 0 {
+        return (Vec::new(), 1, 1);
+    }
+    let max_shots = max_shots.max(1);
+    let perf_budget = if max_shots >= 6 { ((max_shots as f64 * 0.25).round() as usize).clamp(2, 6) } else { 0 };
+    let mut is_perf = vec![false; n];
+    if perf_budget > 0 {
+        let (mut k, mut section) = (0, usize::MAX);
+        for (i, d) in drafts.iter().enumerate() {
+            if d.section_index != section {
+                (k, section) = (0, d.section_index);
+            }
+            let every = if d.section.contains("chorus") { 2 } else { 3 };
+            is_perf[i] = d.section != "break" && i > 0 && i + 1 < n && k % every == every - 1;
+            k += 1;
+        }
+    }
+    let story_cuts: Vec<usize> = (0..n).filter(|&i| !is_perf[i]).collect();
+    let story = (max_shots - perf_budget).min(story_cuts.len()).max(1);
+    let mut out = vec![0; n];
+    for (j, &i) in story_cuts.iter().enumerate() {
+        out[i] = j * story / story_cuts.len();
+    }
+    let perf_cuts: Vec<usize> = (0..n).filter(|&i| is_perf[i]).collect();
+    for (p, &i) in perf_cuts.iter().enumerate() {
+        out[i] = story + p % perf_budget;
+    }
+    (out, story + perf_budget.min(perf_cuts.len()), story)
+}
+
 /// Gives each slot a shot. Each kind of section (intro, verse, chorus…) gets its own
 /// shots, in proportion to its first appearance's length, within `max_shots`; cuts
 /// cycle through them, and later appearances (the second chorus…) reuse them.
@@ -171,11 +228,17 @@ pub struct Outline {
     pub drafts: Vec<SlotDraft>,
     pub shot_of: Vec<usize>,
     pub shots: usize,
+    /// [`ShotMode::Story`]: shots `0..n` are the story in order, the rest performance.
+    pub story_shots: Option<usize>,
     pub bpm: f64,
     pub song_name: String,
 }
 
 pub fn outline(project: &Project, song_clip: Id, range: (f64, f64), max_shots: usize) -> Result<Outline> {
+    outline_mode(project, song_clip, range, max_shots, ShotMode::Sections)
+}
+
+pub fn outline_mode(project: &Project, song_clip: Id, range: (f64, f64), max_shots: usize, mode: ShotMode) -> Result<Outline> {
     let clip = project.clip(song_clip).ok_or_else(|| anyhow!("the song clip was removed"))?;
     let (from, to) = (range.0.max(clip.start), range.1.min(clip.end()));
     if to - from < 2.0 {
@@ -185,7 +248,16 @@ pub fn outline(project: &Project, song_clip: Id, range: (f64, f64), max_shots: u
     if drafts.is_empty() {
         bail!("could not split the song into shots");
     }
-    let (shot_of, shots) = assign_shots(&drafts, max_shots);
+    let (shot_of, shots, story_shots) = match mode {
+        ShotMode::Sections => {
+            let (shot_of, shots) = assign_shots(&drafts, max_shots);
+            (shot_of, shots, None)
+        }
+        ShotMode::Story => {
+            let (shot_of, shots, story) = assign_story(&drafts, max_shots);
+            (shot_of, shots, Some(story))
+        }
+    };
     // Back-to-back cuts of the same shot become one longer cut (up to 8 s).
     let mut merged: Vec<(SlotDraft, usize)> = Vec::new();
     for (d, s) in drafts.into_iter().zip(shot_of) {
@@ -205,7 +277,13 @@ pub fn outline(project: &Project, song_clip: Id, range: (f64, f64), max_shots: u
     let (drafts, shot_of): (Vec<SlotDraft>, Vec<usize>) = merged.into_iter().unzip();
     let media = clip.media_id().and_then(|m| project.media(m));
     let bpm = clip.media_id().and_then(|m| project.music.get(&m)).map_or(0.0, |a| a.bpm);
-    Ok(Outline { song_clip, drafts, shot_of, shots, bpm, song_name: media.map(|m| m.name.clone()).unwrap_or_default() })
+    Ok(Outline { song_clip, drafts, shot_of, shots, story_shots, bpm, song_name: media.map(|m| m.name.clone()).unwrap_or_default() })
+}
+
+/// `m:ss`, for telling the model where a story shot falls in the song.
+fn mmss(t: f64) -> String {
+    let s = t.max(0.0).round() as u64;
+    format!("{}:{:02}", s / 60, s % 60)
 }
 
 pub fn plan_messages(theme: &str, o: &Outline, aspect: crate::model::Aspect) -> Value {
@@ -220,23 +298,46 @@ pub fn plan_messages_cast(theme: &str, o: &Outline, aspect: crate::model::Aspect
         let slots: Vec<&SlotDraft> = o.drafts.iter().zip(&o.shot_of).filter(|(_, s)| **s == i).map(|(d, _)| d).collect();
         let Some(first) = slots.first() else { continue };
         let lyric = slots.iter().map(|d| d.lyric.as_str()).find(|l| !l.is_empty()).unwrap_or("");
-        lines += &format!(
-            "Shot {}: {} section, {:.1}s, energy {:.0}%, used {}×{}\n",
-            i + 1,
-            first.section,
-            first.end - first.start,
-            first.energy * 100.0,
-            slots.len(),
-            if lyric.is_empty() { String::new() } else { format!(", lyrics: \"{lyric}\"") }
-        );
+        let lyric = if lyric.is_empty() { String::new() } else { format!(", lyrics: \"{lyric}\"") };
+        match o.story_shots {
+            Some(story) if i < story => {
+                let (a, b) = (first.start, slots.iter().map(|d| d.end).fold(first.end, f64::max));
+                let mut sections: Vec<&str> = slots.iter().map(|d| d.section.as_str()).collect();
+                sections.dedup();
+                // Every line sung over its stretch, once each.
+                let mut sung: Vec<&str> = Vec::new();
+                for l in slots.iter().flat_map(|d| d.lyric.split(" / ")).map(str::trim).filter(|l| !l.is_empty()) {
+                    if !sung.contains(&l) {
+                        sung.push(l);
+                    }
+                }
+                let lyric = if sung.is_empty() { String::new() } else { format!(", lyrics: \"{}\"", sung.join(" / ")) };
+                lines += &format!("Shot {} (story, {}–{}, {} section, energy {:.0}%{lyric})\n", i + 1, mmss(a), mmss(b), sections.join("/"), first.energy * 100.0);
+            }
+            Some(_) => lines += &format!("Shot {} (performance, recurs {}× across the whole song)\n", i + 1, slots.len()),
+            None => {
+                lines += &format!("Shot {}: {} section, {:.1}s, energy {:.0}%, used {}×{lyric}\n", i + 1, first.section, first.end - first.start, first.energy * 100.0, slots.len());
+            }
+        }
     }
+    let structure = match o.story_shots {
+        Some(story) if story < o.shots => format!(
+            "Shots 1–{story} tell the story in chronological order: each one plays only during the time shown, so the story moves forward and never \
+             goes back; follow the theme's timeline where it gives one. Shots {}–{} are performance shots of the artist singing, cut in between the \
+             story all through the song; give them distinct performance setups.\n",
+            story + 1,
+            o.shots
+        ),
+        Some(_) => "The shots tell the story in chronological order: each one plays only during the time shown; follow the theme's timeline where it gives one.\n".into(),
+        None => String::new(),
+    };
     json!([
         { "role": "system", "content": "You are a music video director. Design a visually striking, coherent music video: a clear concept, \
 consistent characters/wardrobe/locations, and shots that match each section's energy (calm, wide, slow moves in quiet parts; \
 dynamic, close, fast moves in loud ones). Each shot is ONE continuous moment an image-to-video model can animate; no text in frames. \
 Echo the lyrics visually where they're given, without being literal." },
         { "role": "user", "content": format!(
-            "Song: {} ({:.0} BPM). Canvas: {}.\nTheme / idea: {theme}\n{}\nWrite exactly {} shots, in order:\n{lines}",
+            "Song: {} ({:.0} BPM). Canvas: {}.\nTheme / idea: {theme}\n{}\n{structure}Write exactly {} shots, in order:\n{lines}",
             o.song_name, o.bpm, aspect.short_label(),
             if cast.is_empty() { String::new() } else { format!(
                 "Recurring characters: {}. Name them explicitly (by first name) in every shot description where they appear; never describe their faces, \
@@ -248,8 +349,9 @@ Echo the lyrics visually where they're given, without being literal." },
 }
 
 /// Plans the music video: outline → model → storyboard (frames not drawn yet).
-pub fn plan(client: &Client, model: &str, theme: &str, project: &Project, song_clip: Id, range: (f64, f64), max_shots: usize, out_root: &Path) -> Result<Storyboard> {
-    plan_cast(client, model, theme, project, song_clip, range, max_shots, out_root, &[])
+#[allow(clippy::too_many_arguments)]
+pub fn plan(client: &Client, model: &str, theme: &str, project: &Project, song_clip: Id, range: (f64, f64), max_shots: usize, mode: ShotMode, out_root: &Path) -> Result<Storyboard> {
+    plan_cast(client, model, theme, project, song_clip, range, max_shots, mode, out_root, &[])
 }
 
 /// [`plan`] with a cast: named people with photos, kept on the storyboard.
@@ -262,6 +364,7 @@ pub fn plan_cast(
     song_clip: Id,
     range: (f64, f64),
     max_shots: usize,
+    mode: ShotMode,
     out_root: &Path,
     cast: &[super::storyboard::CastMember],
 ) -> Result<Storyboard> {
@@ -275,7 +378,7 @@ pub fn plan_cast(
         project.music.insert(media, a.clone());
         fresh = Some(a);
     }
-    let o = outline(&project, song_clip, range, max_shots)?;
+    let o = outline_mode(&project, song_clip, range, max_shots, mode)?;
     let aspect = project.aspect;
     let names: Vec<String> = cast.iter().map(|c| c.name.clone()).collect();
     let (v, usage) = client.chat_json(model, plan_messages_cast(theme, &o, aspect, &names), "music_video", schema(o.shots))?;
@@ -519,7 +622,7 @@ mod tests {
         p.place_clip(c, None);
         let range = best_window(&p, 30.0).unwrap();
         let root = dirs_videos().join("RustCut AI");
-        let mut sb = plan(&client, &settings.edit_model, &theme, &p, id, range, 10, &root).unwrap();
+        let mut sb = plan(&client, &settings.edit_model, &theme, &p, id, range, 10, ShotMode::Sections, &root).unwrap();
         println!("planned \"{}\" ({} shots, {} cuts, {:.1}–{:.1}s) for ${:.4}", sb.title, sb.shots.len(), sb.slots.len(), range.0, range.1, sb.spent);
         println!("style: {}
 concept: {}", sb.style, sb.script);
@@ -598,7 +701,8 @@ total spent: ${:.3}", sb.dir.display(), sb.spent);
                     let (n, p) = e.split_once('=')?;
                     Some(crate::ai::storyboard::CastMember { name: n.trim().into(), photo: p.trim().into() })
                 }).collect();
-                let mut sb = plan_cast(&client, &settings.edit_model, &theme, &p, song, (clip.start, clip.end()), shots, &dir, &cast).unwrap();
+                let mode = std::env::var("MV_MODE").ok().and_then(|m| ShotMode::parse(&m)).unwrap_or_default();
+                let mut sb = plan_cast(&client, &settings.edit_model, &theme, &p, song, (clip.start, clip.end()), shots, mode, &dir, &cast).unwrap();
                 sb.character = std::env::var("MV_CHARACTER").ok().map(Into::into);
                 sb.save().unwrap();
                 println!("planned \"{}\": {} shots, {} cuts, ${:.4}\nstyle: {}\nconcept: {}", sb.title, sb.shots.len(), sb.slots.len(), sb.spent, sb.style, sb.script);
@@ -608,6 +712,21 @@ total spent: ${:.3}", sb.dir.display(), sb.spent);
                     println!("shot {:2} [{}×, {:.1}s] {{{}}} {} | motion: {}", i + 1, sb.uses(i), s.seconds, who.join("+"), s.description, s.motion);
                 }
                 println!("storyboard: {}\ntotal spent: ${:.3}", sb.dir.join("storyboard.json").display(), sb.spent);
+            }
+            "outline" => {
+                // Free dry run: the cut plan and the shot list the text model would get.
+                let p = Project::load(&project_path).unwrap();
+                let song = crate::multicam::song_clip(&p).unwrap();
+                let clip = p.clip(song).unwrap().clone();
+                let shots: usize = std::env::var("MV_SHOTS").ok().and_then(|s| s.parse().ok()).unwrap_or(16);
+                let mode = std::env::var("MV_MODE").ok().and_then(|m| ShotMode::parse(&m)).unwrap_or_default();
+                let o = outline_mode(&p, song, (clip.start, clip.end()), shots, mode).unwrap();
+                println!("{} cuts, {} shots ({mode:?})", o.drafts.len(), o.shots);
+                println!("{}", plan_messages(&std::env::var("MV_THEME").unwrap_or_default(), &o, p.aspect)[1]["content"].as_str().unwrap());
+                let row: Vec<String> = o.drafts.iter().zip(&o.shot_of).map(|(d, s)| format!("{}:{}", mmss(d.start), s + 1)).collect();
+                for r in row.chunks(12) {
+                    println!("  {}", r.join(" "));
+                }
             }
             "sheet" => {
                 // A character reference sheet from a description: MV_SHEET_NAME="Saivon" MV_SHEET_PROMPT="…"
@@ -684,6 +803,49 @@ total spent: ${:.3}", sb.dir.display(), sb.spent);
             }
             other => panic!("unknown stage {other}"),
         }
+    }
+
+    #[test]
+    fn story_mode_moves_forward_with_recurring_performance() {
+        let (p, _) = song_project();
+        let d = plan_slots(&p, 0.0, 80.0);
+        let (shot_of, shots, story) = assign_story(&d, 10);
+        assert_eq!((story, shots), (7, 10), "a quarter of the budget for performance");
+        let story_seq: Vec<usize> = shot_of.iter().copied().filter(|&s| s < story).collect();
+        assert!(story_seq.windows(2).all(|w| w[1] == w[0] || w[1] == w[0] + 1), "story shots only move forward: {story_seq:?}");
+        assert_eq!((story_seq[0], *story_seq.last().unwrap()), (0, story - 1), "the story starts and ends the video");
+        assert!(shot_of[0] < story && *shot_of.last().unwrap() < story);
+        // Performance cuts: every 2nd cut in a chorus, every 3rd elsewhere, cycling through the pool.
+        let perf: Vec<(usize, &str)> = shot_of.iter().zip(&d).filter(|(&s, _)| s >= story).map(|(&s, d)| (s, d.section.as_str())).collect();
+        let pattern = |a: f64, b: f64| -> String { d.iter().zip(&shot_of).filter(|(x, _)| x.start >= a && x.start < b).map(|(_, &s)| if s < story { 'S' } else { 'P' }).collect() };
+        assert_eq!(pattern(32.0, 48.0), "SPSP", "first chorus: every 2nd cut");
+        assert_eq!(pattern(64.0, 80.0), "SPSS", "last chorus: the final cut stays on the story");
+        assert_eq!(pattern(16.0, 32.0), "SSPS", "verse: every 3rd cut");
+        assert!(perf.windows(2).all(|w| w[0].0 != w[1].0), "performance shots alternate");
+        assert_eq!(perf.iter().map(|x| x.0).collect::<std::collections::BTreeSet<_>>().len(), 3);
+        // A small budget is all story.
+        let (small, n, s) = assign_story(&d, 4);
+        assert_eq!((n, s), (4, 4));
+        assert!(small.windows(2).all(|w| w[1] >= w[0]));
+    }
+
+    #[test]
+    fn story_mode_tells_the_model_each_shots_role() {
+        let (p, song) = song_project();
+        let o = outline_mode(&p, song, (0.0, 80.0), 10, ShotMode::Story).unwrap();
+        assert_eq!(o.story_shots, Some(7));
+        let msgs = plan_messages_cast("a breakup story", &o, crate::model::Aspect::Landscape, &[]);
+        let user = msgs[1]["content"].as_str().unwrap();
+        assert!(user.contains("Shots 1–7 tell the story in chronological order"), "{user}");
+        assert!(user.contains("Shot 1 (story, 0:00–"), "{user}");
+        assert!(user.contains("Shot 8 (performance, recurs"), "{user}");
+        assert!(!user.contains("Shot 11"), "exactly 10 shots");
+        // Sections mode keeps the old prompt.
+        let o = outline(&p, song, (0.0, 80.0), 10).unwrap();
+        assert_eq!(o.story_shots, None);
+        assert!(!plan_messages(&"x", &o, crate::model::Aspect::Landscape)[1]["content"].as_str().unwrap().contains("chronological"));
+        assert_eq!(ShotMode::parse("Story"), Some(ShotMode::Story));
+        assert_eq!(ShotMode::parse("sections"), Some(ShotMode::Sections));
     }
 
     #[test]

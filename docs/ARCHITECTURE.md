@@ -122,7 +122,8 @@ envelopes with an FFT to place takes ("Cam N" tracks, `Track.angle`) and builds 
 points. `lyrics.rs` parses enhanced LRC, aligns plain lyrics to whisper words by edit-distance DP and lays out
 caption clips. `reactive.rs` renders `showfreqs`/`showwaves`/`avectorscope` to transparent qtrle .mov and turns
 bass/RMS envelopes into simplified (RDP) keyframes. `ai/music_video.rs` plans bar-aligned slots, allocates shots
-per section kind (repeats reuse), and assembles at slot times; `best_window` picks the most energetic downbeat-
+per section kind (repeats reuse) or, in story mode (`ShotMode::Story`), as chronological story shots each over its own stretch with a
+recurring performance pool on every 2nd chorus cut / 3rd other cut, and assembles at slot times; `best_window` picks the most energetic downbeat-
 aligned window. Keyframe expressions are balanced trees (log depth) and graphs over 8 KB go to FFmpeg via
 `-/filter_complex <file>`, so long beat animations export.
 

@@ -1577,7 +1577,11 @@ impl<W: Write> Server<W> {
                 bail!("cast photo not found for {}: {}", c.name, c.photo.display());
             }
         }
-        let mut sb = music_video::plan_cast(&client, &model, &theme, &self.project, song, range, max_shots, &root, &cast)?;
+        let mode = match opt_str(a, "shot_mode")? {
+            Some(m) => music_video::ShotMode::parse(m).ok_or_else(|| anyhow!("shot_mode must be sections or story"))?,
+            None => music_video::ShotMode::Sections,
+        };
+        let mut sb = music_video::plan_cast(&client, &model, &theme, &self.project, song, range, max_shots, mode, &root, &cast)?;
         sb.fresh_analysis = None;
         if let Some(img) = opt_str(a, "character_image")? {
             if !Path::new(img).is_file() {
@@ -2564,6 +2568,7 @@ fn tool_definitions() -> Vec<Value> {
             "theme": string("The video's idea, e.g. 'neon city at night, a lonely dancer in a red jacket'"),
             "cover": { "type": "string", "enum": ["whole", "best30"], "description": "Whole song (default) or its best 30 s" },
             "max_shots": num("Unique shots to generate (3–24, default 10)"),
+            "shot_mode": { "type": "string", "enum": ["sections", "story"], "description": "sections (default): each kind of section gets its own shots and repeats (2nd chorus…) reuse them. story: for a narrative treatment, story shots run in song order, each over its own stretch, with a few recurring performance shots in between" },
             "aspect": { "type": "string", "enum": ["16:9", "9:16", "1:1", "4:3", "4:5"] },
             "draw_frames": boolean("Draw the frames now (default true)"),
             "model": string("Text model (default: RustCut's editing model)"),
