@@ -218,8 +218,14 @@ pub fn fit_within(w: u32, h: u32, max_w: u32, max_h: u32) -> (u32, u32) {
 
 /// Decodes a single RGBA frame of exactly `w×h` at `time` seconds.
 pub fn extract_frame(path: &Path, time: f64, w: u32, h: u32) -> Result<Vec<u8>> {
-    let out = command(&ffmpeg_bin())
-        .args(["-hide_banner", "-loglevel", "error", "-ss", &format!("{:.3}", time.max(0.0)), "-i"])
+    let mut cmd = command(&ffmpeg_bin());
+    cmd.args(["-hide_banner", "-loglevel", "error"]);
+    // No seek at 0: FFmpeg 9 returns no frame (and no error) for `-ss 0` before a JPEG.
+    if time > 0.0 {
+        cmd.args(["-ss", &format!("{time:.3}")]);
+    }
+    let out = cmd
+        .arg("-i")
         .arg(path)
         .args([
             "-frames:v",
@@ -330,6 +336,35 @@ mod tests {
         assert_eq!(fit_within(1920, 1080, 960, 960), (960, 540));
         assert_eq!(fit_within(1080, 1920, 960, 960), (540, 960));
         assert_eq!(fit_within(320, 240, 960, 960), (320, 240));
+    }
+
+    /// AI image tools embed C2PA content credentials as a large APP11 segment; with it,
+    /// FFmpeg 9 drops the only frame of a JPEG when asked to seek (`-ss 0`).
+    #[test]
+    fn decodes_a_jpeg_with_content_credentials() {
+        if !is_available() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("rc-jpeg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let jpg = dir.join("card.jpg");
+        let ok = command(&ffmpeg_bin())
+            .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=c=teal:s=320x176", "-frames:v", "1"])
+            .arg(&jpg)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+        let plain = std::fs::read(&jpg).unwrap();
+        let body = [b"JP\x00\x01".as_slice(), &[0u8; 15_000]].concat();
+        let mut with_app11 = vec![0xFF, 0xD8, 0xFF, 0xEB];
+        with_app11.extend(((body.len() + 2) as u16).to_be_bytes());
+        with_app11.extend(&body);
+        with_app11.extend(&plain[2..]);
+        std::fs::write(&jpg, with_app11).unwrap();
+        let frame = extract_frame(&jpg, 0.0, 160, 88).expect("a JPEG still decodes at time 0");
+        assert_eq!(frame.len(), 160 * 88 * 4);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
