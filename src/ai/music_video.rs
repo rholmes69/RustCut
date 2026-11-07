@@ -728,6 +728,39 @@ total spent: ${:.3}", sb.dir.display(), sb.spent);
                     println!("  {}", r.join(" "));
                 }
             }
+            "newshot" => {
+                // One extra shot in the storyboard's style and cast, for the media library:
+                // MV_DESC="…" [MV_MOTION="…"] [MV_SECONDS=5] [MV_DRY=1], then MV_STILL=<approved still> to animate.
+                let latest = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.is_dir() && p.join("storyboard.json").is_file()).max_by_key(|p| p.metadata().and_then(|m| m.modified()).ok()).expect("a planned storyboard");
+                let base = crate::ai::storyboard::Storyboard::load(&latest.join("storyboard.json")).unwrap();
+                let p = Project::load(&project_path).unwrap();
+                let desc = std::env::var("MV_DESC").expect("MV_DESC");
+                let motion = std::env::var("MV_MOTION").unwrap_or_default();
+                let seconds: f64 = std::env::var("MV_SECONDS").ok().and_then(|s| s.parse().ok()).unwrap_or(5.0);
+                let src = crate::ai::reshoot::Source { storyboard: Some(base), shot: None, performance: false };
+                let out = dir.join("RustCut AI").join("new shots").join(crate::ai::video_gen::slug(&desc));
+                let mut sb = crate::ai::reshoot::one_shot(&p, &src, &desc, &motion, seconds, false, &out);
+                let who: Vec<&str> = sb.cast_in(0).iter().map(|c| c.name.as_str()).collect();
+                println!("cast in shot: {who:?}\nstyle: {}\nfolder: {}", sb.style, out.display());
+                if std::env::var("MV_DRY").is_ok() {
+                    return;
+                }
+                let client = Client::from_settings(&settings).expect("OpenRouter key");
+                match std::env::var("MV_STILL") {
+                    Err(_) => {
+                        let (frame, cost) = crate::ai::reshoot::draw(&client, &mut sb, &settings.image_model, None).unwrap();
+                        println!("still: {} (${cost:.3})", frame.display());
+                    }
+                    Ok(still) => {
+                        sb.shots[0].frame = Some(still.into());
+                        let model_id = std::env::var("MV_VIDEO_MODEL").unwrap_or_else(|_| "x-ai/grok-imagine-video-1.5-lite".into());
+                        let m = crate::ai::video_gen::list_models(&client).unwrap().into_iter().find(|m| m.id == model_id).expect("video model");
+                        println!("estimate: {:?}", crate::ai::reshoot::estimate_animation(&sb, &m));
+                        let g = crate::ai::reshoot::animate(&client, &sb, &m, &cancel, &mut |p, s| if (p * 100.0) as i32 % 20 == 0 { println!("  {s}") }).unwrap().unwrap();
+                        println!("video: {} ({:.1} s, ${:.3})", g.path.display(), g.info.duration, g.cost.unwrap_or(0.0));
+                    }
+                }
+            }
             "sheet" => {
                 // A character reference sheet from a description: MV_SHEET_NAME="Saivon" MV_SHEET_PROMPT="…"
                 let client = Client::from_settings(&settings).expect("OpenRouter key");
