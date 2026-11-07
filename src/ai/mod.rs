@@ -8,6 +8,7 @@ pub mod performance;
 pub mod reshoot;
 pub mod music_video;
 pub mod openrouter;
+pub mod references;
 pub mod reframe;
 pub mod rough_cut;
 pub mod storyboard;

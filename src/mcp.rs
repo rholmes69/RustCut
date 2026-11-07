@@ -179,6 +179,7 @@ impl<W: Write> Server<W> {
             "clone_voice" => self.clone_voice(a),
             "lip_sync" => self.lip_sync(a),
             "performance_shot" => self.performance_shot(a, progress),
+            "reference_shot" => self.reference_shot(a, progress),
             "reshoot_clip" => self.reshoot_clip(a, progress),
             "set_price" => self.set_price(a),
             "generate_thumbnail" => self.generate_thumbnail(a, progress),
@@ -1871,6 +1872,37 @@ impl<W: Write> Server<W> {
         })))
     }
 
+    fn reference_shot(&mut self, a: &Value, progress: Option<Value>) -> Result<Vec<Value>> {
+        use crate::ai::references::RefShot;
+        let prompt = opt_str(a, "prompt")?.ok_or_else(|| anyhow!("`prompt` is required"))?;
+        let images: Vec<PathBuf> = a["images"].as_array().ok_or_else(|| anyhow!("`images` must be an array of image paths"))?.iter().filter_map(Value::as_str).map(PathBuf::from).collect();
+        let seconds = a.get("seconds").and_then(Value::as_f64).unwrap_or(5.0).round() as u32;
+        let shot = RefShot::new(prompt, images, seconds, opt_str(a, "model")?.unwrap_or("fast"), self.project.aspect.short_label());
+        let (errors, warnings) = shot.check();
+        let summary = json!({
+            "prompt": shot.prompt, "model": shot.model, "seconds": shot.seconds,
+            "estimated_usd": (shot.estimate() * 100.0).round() / 100.0,
+            "tags": shot.images.iter().enumerate().map(|(i, p)| json!({ "tag": format!("@Image{}", i + 1), "path": p.display().to_string() })).collect::<Vec<_>>(),
+            "warnings": warnings, "errors": errors,
+        });
+        if opt_bool(a, "dry_run")?.unwrap_or(false) {
+            return Ok(text_json(&summary));
+        }
+        if !errors.is_empty() {
+            bail!("{}", errors.join("; "));
+        }
+        let key = crate::ai::openrouter::AiSettings::load().fal_key().ok_or_else(|| anyhow!(crate::ai::lipsync::NO_KEY))?;
+        let dir = crate::ai::video_gen::output_dir(self.path.as_deref()).join("reference shots");
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let path = {
+            let mut notify = progress_notifier(&mut self.out, progress);
+            shot.generate(&key, &dir, &cancel, &mut |p, s| notify(p, s))?.ok_or_else(|| anyhow!("cancelled"))?
+        };
+        let info = ffmpeg::probe(&path)?;
+        let id = self.project.add_media(info.into_media_item(path.clone()));
+        Ok(text_json(&json!({ "media_id": id, "path": path.display().to_string(), "estimated_usd": summary["estimated_usd"], "hint": "Added to the media library: add_clip or replace_media to use it." })))
+    }
+
     fn reshoot_clip(&mut self, a: &Value, progress: Option<Value>) -> Result<Vec<Value>> {
         use crate::ai::reshoot;
         let clip = req_id(a, "clip_id")?;
@@ -2654,6 +2686,13 @@ fn tool_definitions() -> Vec<Value> {
             "character_sheet": string("Optional character sheet image path for a consistent face"),
             "dry_run": boolean("Only plan: return segments, lyrics and estimated cost"),
         }), &["clip_id"], json!({ "readOnlyHint": false, "destructiveHint": false, "openWorldHint": true })),
+        tool("reference_shot", "Reference shot (Seedance 2.0, tagged images)", "Generates one new shot with Seedance 2.0 on fal.ai from a prompt that tags reference images as @Image1…@Image9 (character sheets, an animal, a location). @ImageN is the N-th path in `images`; loose tags like '@Image 3' are normalised. The video is added to the media library (not the timeline). Paid: ≈ $0.24/s (fast) or $0.30/s (best); use dry_run first to check tags and cost.", json!({
+            "prompt": string("The shot, tagging images as @Image1, @Image2, …"),
+            "images": { "type": "array", "items": { "type": "string" }, "description": "Reference image paths in tag order (max 9)" },
+            "seconds": num("Length, 4–15 s (default 5)"),
+            "model": { "type": "string", "enum": ["fast", "best"] },
+            "dry_run": boolean("Only check the tags and return the estimated cost"),
+        }), &["prompt", "images"], json!({ "readOnlyHint": false, "destructiveHint": false, "openWorldHint": true })),
         tool("reshoot_clip", "Reshoot one clip (AI)", "Re-generates just one cut on the timeline from a prompt: draws a new still (keeping the storyboard's style and cast, and the current shot's look unless keep_look=false), animates it and swaps it in at the same place and length. Other cuts of the same storyboard shot are untouched. Description/motion default to the storyboard shot's. Use still_only=true first to review the still (≈ $0.07), then call again with still=<path> to animate (≈ $0.14+ depending on model).", json!({
             "clip_id": int("The clip to reshoot"),
             "description": string("What the new shot shows (default: the storyboard shot's description)"),
@@ -2719,7 +2758,7 @@ mod tests {
         assert!(s.handle_line(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#).is_none());
         let r = call(&mut s, 3, "tools/list", json!({}));
         let tools = r["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 60);
+        assert_eq!(tools.len(), 61);
         assert!(tools.iter().all(|t| t["inputSchema"]["type"] == "object"));
         assert_eq!(call(&mut s, 4, "ping", json!({}))["result"], json!({}));
     }

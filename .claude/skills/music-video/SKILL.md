@@ -53,6 +53,15 @@ with `D="C:/Users/sales/Videos/RustCut AI/<Title> music video"`.
 10. **produce (paid):** `MV_STAGE=produce`, run in the background (about 2–10 minutes). It animates the shots, assembles them on the beat with the lyrics, and exports `$D/<Title> - music video (preview 720p).mp4`.
 11. **Check and report:** sample frames (`fps=1/20,tile=4x4`), confirm the video is as long as the song, send the video, and give the total cost with a breakdown. Suggest next steps: `/lip-sync` on close-up singing shots, `/reshoot` for weak cuts, and a 1080p export from RustCut.
 
+## Reference shots (tagged images)
+For a shot that needs specific references beyond the cast (an animal, a prop, a location), use Seedance 2.0 with tags instead of `newshot`: `@ImageN` is the N-th image given, max 9. Dry run first (free), then ask before spending (≈ $0.24/s fast, $0.30/s best):
+
+```bash
+cd /c/Users/sales/MyVideoEditor && REF_IMAGES="a.png;b.png;dog.png;place.jpg" REF_PROMPT_FILE=prompt.txt REF_SECONDS=5 REF_MODEL=fast REF_OUT="$D/RustCut AI/reference shots" [REF_DRY=1] CARGO_INCREMENTAL=0 cargo test --offline --lib refshot_live -- --ignored --nocapture
+```
+
+Or the MCP tool `reference_shot {prompt, images, seconds, model, dry_run}`. fal's ByteDance filter may refuse realistic photos of people as likenesses; character sheets pass more often.
+
 ## Gotchas
 - The song can be longer than the lyrics suggest. Use the length from the prepare step.
 - Claude's desktop app runs commands inside a Windows app package that redirects `AppData\Roaming`. A stale shadow copy of RustCut's settings lived at `C:\Users\sales\AppData\Local\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\RustCut\` and hid the real `ai.json` until the user renamed it (to `ai.olc.json`). If keys look missing, check there first. Spending recorded from here may land in that folder's shadow `economics.sqlite` instead of the user's real one.
