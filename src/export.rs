@@ -14,6 +14,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+/// Seconds a video clip's last frame is held past the end of its stream (see the layer chain).
+const HOLD_LAST_FRAME: f64 = 0.5;
+
 #[derive(Clone, Debug)]
 pub struct ExportSettings {
     pub path: PathBuf,
@@ -408,6 +411,12 @@ pub fn build_graph(
                         } else {
                             format!("setpts=(PTS-STARTPTS)/{}", num(clip.speed))
                         }];
+                        if !is_image {
+                            // A clip read up to its file's end runs out of frames a frame early
+                            // (the last frame starts before the end); hold it so the black canvas
+                            // never flashes before the cut. The overlay's enable window ends it.
+                            chain.push(format!("tpad=stop_mode=clone:stop_duration={}", num(HOLD_LAST_FRAME)));
+                        }
                         chain.extend(layer_filters(
                             clip,
                             media,
@@ -809,6 +818,53 @@ mod tests {
 
     fn settings() -> ExportSettings {
         ExportSettings { path: "out.mp4".into(), short_side: 720, fps: 30, crf: 23, preset: "veryfast".into() }
+    }
+
+    /// A clip that uses its file right to the end (as reused music-video shots do) used to
+    /// run out of frames one frame early and flash the black canvas before the cut.
+    #[test]
+    fn no_black_frame_when_a_clip_reads_to_its_files_end() {
+        if !ffmpeg::is_available() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("rustcut-test-tail-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let make = |name: &str, color: &str| {
+            let path = dir.join(name);
+            let ok = ffmpeg::command(&ffmpeg::ffmpeg_bin())
+                .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", &format!("color=c={color}:s=320x180:r=24:d=8"), "-c:v", "libx264", "-pix_fmt", "yuv420p"])
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok);
+            path
+        };
+        let mut p = Project::default();
+        let add = |p: &mut Project, path: PathBuf| {
+            let m = p.add_media(MediaItem { id: 0, name: "x.mp4".into(), path, kind: MediaKind::Video, duration: 8.041667, width: 320, height: 180, fps: 24.0, has_audio: false });
+            let mut c = p.new_media_clip(m, 0.0).unwrap();
+            // Like a reused music-video shot: the last 3.16 s of the file, read from a seek.
+            c.source_in = 4.883753;
+            c.duration = 3.157914;
+            p.append_to_main(c);
+        };
+        add(&mut p, make("red.mp4", "red"));
+        add(&mut p, make("blue.mp4", "blue"));
+        let out = dir.join("out.mp4");
+        let s = ExportSettings { path: out.clone(), short_side: 180, fps: 30, crf: 18, preset: "ultrafast".into() };
+        assert!(run(&p, &s, &AtomicBool::new(false), |_| {}).unwrap());
+        // The last frames before the cut at 3.158 s.
+        let px = ffmpeg::command(&ffmpeg::ffmpeg_bin())
+            .args(["-hide_banner", "-loglevel", "error", "-i"])
+            .arg(&out)
+            .args(["-ss", "3.10", "-frames:v", "1", "-vf", "scale=1:1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
+            .output()
+            .unwrap()
+            .stdout;
+        assert_eq!(px.len(), 3);
+        assert!(px[0] > 150 && px[2] < 100, "still red before the cut, not black: {px:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
