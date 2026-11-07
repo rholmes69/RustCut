@@ -18,6 +18,7 @@ decoding and rendering, offline, no account, no watermark.
 ## Features
 - Import video, images and audio (dialog or drag & drop) with thumbnails and waveforms
 - Multi-track timeline: move across tracks, trim both edges, split, duplicate, delete, snapping, zoom, lock/hide/mute
+- **Replace clip**: right-click a clip → Replace clip… swaps it, or every clip that uses the same media (all cuts of a reused shot), for another library item; each clip keeps its timing, effects, keyframes and transition
 - Real-time composited preview with audio, frame stepping and on-canvas positioning
 - Transform (position, scale, rotation, opacity, fit/fill), speed 0.25×–4×, volume, fade in/out
 - **Keyframe animation** for position, scale, rotation, opacity and volume: ◆ toggles in the inspector,

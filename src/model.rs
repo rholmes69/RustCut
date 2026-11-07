@@ -1236,6 +1236,69 @@ impl Project {
         Some(new_id)
     }
 
+    /// Clips that use media `media`, in timeline order.
+    pub fn clips_using(&self, media: Id) -> Vec<Id> {
+        let mut found: Vec<(f64, Id)> = self.tracks.iter().flat_map(|t| &t.clips).filter(|c| c.media_id() == Some(media)).map(|c| (c.start, c.id)).collect();
+        found.sort_by(|a, b| a.0.total_cmp(&b.0));
+        found.into_iter().map(|(_, id)| id).collect()
+    }
+
+    /// Whether media `new` can stand in for `clip`'s media: a picture (video or image) for a
+    /// clip on a video track, anything with sound for one on an audio track.
+    pub fn can_replace_with(&self, clip: &Clip, new: Id) -> bool {
+        let Some(m) = self.media(new) else { return false };
+        if clip.media_id().is_none() || clip.media_id() == Some(new) {
+            return false;
+        }
+        match self.track_kind_for(clip) {
+            TrackKind::Video => m.has_video(),
+            TrackKind::Audio => m.has_sound(),
+            TrackKind::Text => false,
+        }
+    }
+
+    /// Points `clips` at media `new`, keeping each one's place, length, look, keyframes,
+    /// volume and transition, so cuts stay where they are (on the beat in a music video).
+    /// A source too short for a clip's span is read from earlier, then slowed down (to 0.5×),
+    /// and only then is the clip shortened. Returns (clips replaced, clips slowed or shortened).
+    pub fn replace_media(&mut self, clips: &[Id], new: Id) -> (usize, usize) {
+        let Some(media) = self.media(new).cloned() else { return (0, 0) };
+        let (mut replaced, mut retimed) = (0, 0);
+        for &id in clips {
+            let Some(c) = self.clip(id) else { continue };
+            if !self.can_replace_with(c, new) {
+                continue;
+            }
+            let on_audio_track = self.track_kind_for(c) == TrackKind::Audio;
+            let Some(c) = self.clip_mut(id) else { continue };
+            c.source = ClipSource::Media(new);
+            // A video's sound on an audio track stays detached audio.
+            c.audio_only = on_audio_track && media.kind != MediaKind::Audio;
+            let before = (c.speed, c.duration);
+            match media.source_len() {
+                None => {
+                    c.source_in = 0.0;
+                    c.speed = 1.0;
+                }
+                Some(len) => {
+                    let span = c.duration * c.speed;
+                    if span <= len {
+                        c.source_in = c.source_in.min(len - span).max(0.0);
+                    } else {
+                        c.source_in = 0.0;
+                        c.speed = (len / c.duration).max(0.5);
+                        c.duration = c.duration.min(len / c.speed).max(MIN_CLIP_LEN);
+                    }
+                }
+            }
+            if media.source_len().is_some() && ((c.speed - before.0).abs() > 1e-9 || (c.duration - before.1).abs() > 1e-9) {
+                retimed += 1;
+            }
+            replaced += 1;
+        }
+        (replaced, retimed)
+    }
+
     /// Moves a clip to `track` at `start` without overlap checks (used while dragging).
     pub fn move_clip_live(&mut self, id: Id, track: usize, start: f64) {
         let Some((ti, ci)) = self.locate(id) else { return };
@@ -1520,6 +1583,62 @@ mod tests {
             fps: 30.0,
             has_audio: true,
         })
+    }
+
+    #[test]
+    fn replaces_every_use_of_a_media_item() {
+        let mut p = Project::default();
+        let a = video(&mut p, 6.0);
+        let other = video(&mut p, 6.0);
+        // Three cuts of shot A (one animated, one with a transition), one cut of another shot.
+        let mut ids = Vec::new();
+        for (m, src_in) in [(a, 0.0), (other, 0.0), (a, 2.0), (a, 1.0)] {
+            let mut c = p.new_media_clip(m, 0.0).unwrap();
+            c.duration = 3.0;
+            c.source_in = src_in;
+            c.volume = 0.0;
+            ids.push(c.id);
+            p.append_to_main(c);
+        }
+        p.clip_mut(ids[2]).unwrap().set_key(Prop::Scale, 0.0, 1.0);
+        p.clip_mut(ids[2]).unwrap().set_key(Prop::Scale, 3.0, 1.2);
+        p.set_transition(ids[3], Some(Transition { kind: TransitionKind::Dissolve, duration: 0.5 })).unwrap();
+        assert_eq!(p.clips_using(a), [ids[0], ids[2], ids[3]]);
+
+        let long = video(&mut p, 10.0);
+        assert_eq!(p.replace_media(&p.clips_using(a), long), (3, 0));
+        assert!(p.clips_using(a).is_empty());
+        let c = p.clip(ids[2]).unwrap();
+        assert_eq!((c.start, c.duration, c.source_in, c.speed, c.volume), (6.0, 3.0, 2.0, 1.0, 0.0), "same place, length and sound");
+        assert!(c.is_animated(Prop::Scale), "keyframes stay");
+        assert!(p.clip(ids[3]).unwrap().transition_in.is_some(), "transitions stay");
+        assert_eq!(p.clip(ids[1]).unwrap().media_id(), Some(other), "other shots are untouched");
+
+        // Shorter sources: read from earlier, then slowed, then (only if needed) shortened.
+        let short = video(&mut p, 4.0);
+        assert_eq!(p.replace_media(&[ids[2]], short), (1, 0));
+        assert_eq!(p.clip(ids[2]).unwrap().source_in, 1.0, "3 s from a 4 s file starting at 1 s");
+        let tiny = video(&mut p, 2.0);
+        assert_eq!(p.replace_media(&[ids[2]], tiny), (1, 1));
+        let c = p.clip(ids[2]).unwrap();
+        assert!((c.speed - 2.0 / 3.0).abs() < 1e-9 && c.duration == 3.0, "slowed to fill the cut: {} {}", c.speed, c.duration);
+        let blip = video(&mut p, 1.0);
+        p.replace_media(&[ids[2]], blip);
+        let c = p.clip(ids[2]).unwrap();
+        assert_eq!((c.speed, c.duration), (0.5, 2.0), "no slower than 0.5×, then shortened");
+
+        // Kinds must match; the same media is not a replacement.
+        let song = p.add_media(MediaItem { id: 0, path: "song.mp3".into(), name: "song.mp3".into(), kind: MediaKind::Audio, duration: 60.0, width: 0, height: 0, fps: 0.0, has_audio: true });
+        assert_eq!(p.replace_media(&[ids[1]], song), (0, 0), "a song can't replace a picture");
+        assert!(!p.can_replace_with(p.clip(ids[1]).unwrap(), other));
+        // On an audio track, a video's sound replaces a song as detached audio.
+        let mut s = p.new_media_clip(song, 0.0).unwrap();
+        s.duration = 5.0;
+        let sid = s.id;
+        p.place_clip(s, None);
+        assert_eq!(p.replace_media(&[sid], long), (1, 0));
+        let c = p.clip(sid).unwrap();
+        assert!(c.audio_only && p.track_kind_for(c) == TrackKind::Audio);
     }
 
     #[test]

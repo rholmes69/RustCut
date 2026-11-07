@@ -29,6 +29,7 @@ enum ClipMenu {
     Beats,
     LipSync,
     Reshoot,
+    Replace,
 }
 
 fn track_height(kind: TrackKind) -> f32 {
@@ -416,6 +417,11 @@ fn lanes(ui: &mut Ui, app: &mut EditorApp) {
     let mut hover_cursor: Option<CursorIcon> = None;
     {
         let project = &app.project;
+        // How many clips use each media item (for "Replace clip… (N uses)").
+        let mut uses_of: std::collections::HashMap<Id, usize> = std::collections::HashMap::new();
+        for m in project.tracks.iter().flat_map(|t| &t.clips).filter_map(|c| c.media_id()) {
+            *uses_of.entry(m).or_default() += 1;
+        }
         for &(ti, y0, y1) in &lane_rows {
             let track = &project.tracks[ti];
             for clip in &track.clips {
@@ -464,6 +470,18 @@ fn lanes(ui: &mut Ui, app: &mut EditorApp) {
                     if ui.button("📋  Duplicate").clicked() {
                         pick(ClipMenu::Duplicate);
                         ui.close_menu();
+                    }
+                    if let Some(m) = media {
+                        let uses = uses_of.get(&m.id).copied().unwrap_or(1);
+                        let label = if uses > 1 { format!("🔁  Replace clip… ({uses} uses)") } else { "🔁  Replace clip…".to_string() };
+                        if ui
+                            .button(label)
+                            .on_hover_text("Swap this clip, or every clip of the same media, for another library item; timing and effects stay")
+                            .clicked()
+                        {
+                            pick(ClipMenu::Replace);
+                            ui.close_menu();
+                        }
                     }
                     if sounds {
                         ui.separator();
@@ -619,6 +637,7 @@ fn lanes(ui: &mut Ui, app: &mut EditorApp) {
             }
             ClipMenu::LipSync => crate::ui::voice::open_lipsync(app, id),
             ClipMenu::Reshoot => crate::ui::reshoot::open(app, id),
+            ClipMenu::Replace => crate::ui::replace::open(app, id),
             ClipMenu::Plate => crate::ui::image_gen::start(app, &ctx, crate::ai::image_gen::Job::Plate { clip: id }),
         }
     }

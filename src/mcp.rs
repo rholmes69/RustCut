@@ -151,6 +151,7 @@ impl<W: Write> Server<W> {
             "split_clip" => self.split_clip(a),
             "delete_clip" => self.delete_clip(a),
             "duplicate_clip" => self.duplicate_clip(a),
+            "replace_media" => self.replace_media(a),
             "update_track" => self.update_track(a),
             "undo" => Ok(vec![text(if self.history.undo(&mut self.project) { "Undone." } else { "Nothing to undo." })]),
             "redo" => Ok(vec![text(if self.history.redo(&mut self.project) { "Redone." } else { "Nothing to redo." })]),
@@ -640,6 +641,30 @@ impl<W: Write> Server<W> {
         let id = req_id(a, "clip_id")?;
         let new = self.project.duplicate_clip(id).ok_or_else(|| anyhow!("no clip with id {id}"))?;
         Ok(text_json(&json!({ "clip": self.clip_json_by_id(new) })))
+    }
+
+    fn replace_media(&mut self, a: &Value) -> Result<Vec<Value>> {
+        let id = req_id(a, "clip_id")?;
+        let new = req_id(a, "with_media_id")?;
+        let clip = self.project.clip(id).cloned().ok_or_else(|| anyhow!("no clip with id {id}"))?;
+        let old = clip.media_id().ok_or_else(|| anyhow!("clip {id} is text, not media"))?;
+        if self.project.media(new).is_none() {
+            bail!("no media with id {new} (import_media first)");
+        }
+        if !self.project.can_replace_with(&clip, new) {
+            bail!("media {new} can't replace clip {id}: use a video or image for a picture clip, or something with sound for an audio clip");
+        }
+        let targets = match opt_str(a, "scope")?.unwrap_or("all") {
+            "clip" | "this" => vec![id],
+            _ => self.project.clips_using(old),
+        };
+        let (replaced, retimed) = self.project.replace_media(&targets, new);
+        Ok(text_json(&json!({
+            "replaced": replaced,
+            "retimed": retimed,
+            "clip_ids": targets,
+            "hint": if retimed > 0 { "The new media is shorter than some cuts: those were slowed (down to 0.5×) or shortened." } else { "Every clip kept its place, length, look, keyframes and transition." },
+        })))
     }
 
     fn update_track(&mut self, a: &Value) -> Result<Vec<Value>> {
@@ -2379,6 +2404,11 @@ fn tool_definitions() -> Vec<Value> {
         tool("split_clip", "Split", "Splits a clip at a timeline time. Without `clip_id`, splits every clip under that time on unlocked tracks. Returns the ids of both halves.", json!({ "time": num("Timeline time in seconds"), "clip_id": int("Clip to split (optional)") }), &["time"], edit.clone()),
         tool("delete_clip", "Delete clip", "Deletes a clip. With `ripple`, later clips on the same track move left to close the gap.", json!({ "clip_id": int("Clip id"), "ripple": boolean("Close the gap (default false)") }), &["clip_id"], destructive.clone()),
         tool("duplicate_clip", "Duplicate clip", "Copies a clip and places the copy right after it.", json!({ "clip_id": int("Clip id") }), &["clip_id"], edit.clone()),
+        tool("replace_media", "Replace clip media", "Swaps a clip's media for another library item; by default every clip that uses the same media (e.g. every cut of a reused shot). Each clip keeps its place, length, transform, filters, keyframes, volume and transition. A shorter source is read from earlier, then slowed (to 0.5×), then the clip is shortened.", json!({
+            "clip_id": int("A clip that uses the media to replace"),
+            "with_media_id": int("Library media id to use instead (import_media first)"),
+            "scope": { "type": "string", "enum": ["all", "clip"], "description": "all (default): every clip using the same media; clip: only this one" },
+        }), &["clip_id", "with_media_id"], edit.clone()),
         tool("update_track", "Update track", "Renames, mutes, hides or locks a track.", json!({ "track_index": track, "name": string("Track name"), "muted": boolean("Mute audio"), "hidden": boolean("Hide video/text"), "locked": boolean("Prevent edits") }), &["track_index"], edit.clone()),
         tool("undo", "Undo", "Undoes the last edit.", json!({}), &[], edit.clone()),
         tool("redo", "Redo", "Redoes the last undone edit.", json!({}), &[], edit.clone()),
@@ -2689,7 +2719,7 @@ mod tests {
         assert!(s.handle_line(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#).is_none());
         let r = call(&mut s, 3, "tools/list", json!({}));
         let tools = r["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 59);
+        assert_eq!(tools.len(), 60);
         assert!(tools.iter().all(|t| t["inputSchema"]["type"] == "object"));
         assert_eq!(call(&mut s, 4, "ping", json!({}))["result"], json!({}));
     }
@@ -2837,6 +2867,32 @@ mod tests {
         let (err, _) = tool_call(&mut s, "delete_clip", json!({ "clip_id": ids[1], "ripple": true }));
         assert!(!err);
         assert_eq!(s.project.clip(ids[2]).unwrap().start, 3.0);
+    }
+
+    #[test]
+    fn replace_media_swaps_every_cut_of_a_shot() {
+        let mut s = Server::new(Vec::new());
+        let item = |s: &mut Server<Vec<u8>>, name: &str, kind: MediaKind| {
+            s.project.add_media(MediaItem { id: 0, path: name.into(), name: name.into(), kind, duration: 8.0, width: 1280, height: 720, fps: 24.0, has_audio: false })
+        };
+        let (shot, other, new, song) = (item(&mut s, "shot.mp4", MediaKind::Video), item(&mut s, "other.mp4", MediaKind::Video), item(&mut s, "new.mp4", MediaKind::Video), item(&mut s, "song.mp3", MediaKind::Audio));
+        let mut ids = Vec::new();
+        for m in [shot, other, shot] {
+            let mut c = s.project.new_media_clip(m, 0.0).unwrap();
+            c.duration = 3.0;
+            ids.push(c.id);
+            s.project.append_to_main(c);
+        }
+        let (err, out) = tool_call(&mut s, "replace_media", json!({ "clip_id": ids[0], "with_media_id": song }));
+        assert!(err && out.contains("can't replace"), "{out}");
+        let (err, out) = tool_call(&mut s, "replace_media", json!({ "clip_id": ids[0], "with_media_id": new, "scope": "clip" }));
+        assert!(!err, "{out}");
+        assert_eq!(serde_json::from_str::<Value>(&out).unwrap()["replaced"], 1);
+        assert_eq!(s.project.clip(ids[2]).unwrap().media_id(), Some(shot), "scope clip: the other cut stays");
+        let (err, _) = tool_call(&mut s, "replace_media", json!({ "clip_id": ids[2], "with_media_id": new }));
+        assert!(!err);
+        assert_eq!(s.project.clips_using(new), [ids[0], ids[2]]);
+        assert_eq!(s.project.clip(ids[1]).unwrap().media_id(), Some(other));
     }
 
     #[test]
