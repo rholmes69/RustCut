@@ -85,6 +85,11 @@ pub fn show(ctx: &Context, app: &mut EditorApp) {
                 });
                 ui.menu_button("Edit", |ui| {
                     ui.set_min_width(220.0);
+                    if ui.button("🎞 Timeline storyboard…").clicked() {
+                        app.clip_board.open = true;
+                        ui.close_menu();
+                    }
+                    ui.separator();
                     if ui.add_enabled(app.history.can_undo(), egui::Button::new("Undo                  Ctrl+Z")).clicked() {
                         app.undo();
                         ui.close_menu();

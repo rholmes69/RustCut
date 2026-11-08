@@ -17,8 +17,13 @@ const MAX_H: u32 = 720;
 #[derive(Default)]
 pub struct MediaPreview {
     media: Option<Id>,
+    /// Previewing one timeline clip: its id and title. Otherwise a whole library item.
+    clip: Option<(Id, String)>,
     tex: Option<TextureHandle>,
+    /// Position in the file (seconds), inside `lo..=hi`.
     pos: f64,
+    lo: f64,
+    hi: f64,
     /// While playing: when playback (re)started and the position then.
     anchor: Option<(Instant, f64)>,
     stream: Option<VideoStream>,
@@ -48,9 +53,8 @@ impl MediaPreview {
     /// (Re)starts decoding at `self.pos`. Paused, only one frame is taken (the still).
     fn start(&mut self, ctx: &Context, audio: &mut AudioEngine, m: &MediaItem, play: bool) {
         self.stop();
-        let len = m.duration.max(0.0);
-        if play && self.pos >= len - 0.05 {
-            self.pos = 0.0;
+        if play && self.pos >= self.hi - 0.05 {
+            self.pos = self.lo;
         }
         if m.kind == MediaKind::Video {
             let (w, h) = ffmpeg::fit_within(m.width, m.height, MAX_W, MAX_H);
@@ -80,8 +84,23 @@ impl MediaPreview {
 /// Opens the preview for a library item; videos and audio start playing right away.
 pub fn open(ctx: &Context, app: &mut EditorApp, id: Id) {
     let Some(m) = app.project.media(id).cloned() else { return };
+    let pv = MediaPreview { media: Some(id), hi: m.duration.max(0.0), ..Default::default() };
+    load(ctx, app, &m, pv);
+}
+
+/// Opens the preview on just the part of the file a timeline clip plays.
+pub fn open_clip(ctx: &Context, app: &mut EditorApp, clip: Id, title: String) {
+    let Some(c) = app.project.clip(clip).cloned() else { return };
+    let Some(m) = c.media_id().and_then(|id| app.project.media(id)).cloned() else { return };
+    let lo = c.source_in.max(0.0);
+    let span = c.duration * c.speed.max(0.01);
+    let hi = if m.kind == MediaKind::Image || m.duration <= 0.0 { lo + span } else { (lo + span).min(m.duration) };
+    let pv = MediaPreview { media: Some(m.id), clip: Some((clip, title)), pos: lo, lo, hi: hi.max(lo + 0.05), ..Default::default() };
+    load(ctx, app, &m, pv);
+}
+
+fn load(ctx: &Context, app: &mut EditorApp, m: &MediaItem, mut pv: MediaPreview) {
     app.pause();
-    let mut pv = MediaPreview { media: Some(id), ..Default::default() };
     if !m.path.exists() {
         pv.error = Some(format!("File not found: {}", m.path.display()));
     } else if m.kind == MediaKind::Image {
@@ -91,7 +110,7 @@ pub fn open(ctx: &Context, app: &mut EditorApp, id: Id) {
             Err(e) => pv.error = Some(e.to_string()),
         }
     } else {
-        pv.start(ctx, &mut app.audio, &m, true);
+        pv.start(ctx, &mut app.audio, m, true);
     }
     app.media_preview.stop();
     app.media_preview = pv;
@@ -120,13 +139,13 @@ pub fn window(ctx: &Context, app: &mut EditorApp) {
         return;
     };
     let mut pv = std::mem::take(&mut app.media_preview);
-    let len = m.duration.max(0.0);
+    let (lo, hi) = (pv.lo, pv.hi);
 
     // Clock.
     if let Some((t0, p0)) = pv.anchor {
         pv.pos = p0 + t0.elapsed().as_secs_f64();
-        if pv.pos >= len {
-            pv.pos = len;
+        if pv.pos >= hi {
+            pv.pos = hi;
             pv.stop();
         } else {
             ctx.request_repaint();
@@ -156,12 +175,17 @@ pub fn window(ctx: &Context, app: &mut EditorApp) {
 
     let mut open = true;
     let mut add = false;
+    let mut locate = None;
     let title = match m.kind {
         MediaKind::Image => "🖼",
         MediaKind::Video => "🎬",
         MediaKind::Audio => "🎵",
     };
-    egui::Window::new(RichText::new(format!("{title}  {}", m.name)).strong())
+    let heading = match &pv.clip {
+        Some((_, t)) => format!("{title}  {t}"),
+        None => format!("{title}  {}", m.name),
+    };
+    egui::Window::new(RichText::new(heading).strong())
         .id(egui::Id::new("media-preview"))
         .open(&mut open)
         .collapsible(false)
@@ -204,10 +228,10 @@ pub fn window(ctx: &Context, app: &mut EditorApp) {
                         let play = !pv.playing();
                         pv.start(ctx, &mut app.audio, &m, play);
                     }
-                    let time = format!("{} / {}", widgets::format_time(pv.pos), widgets::format_time(len));
+                    let time = format!("{} / {}", widgets::format_time(pv.pos - lo), widgets::format_time(hi - lo));
                     ui.spacing_mut().slider_width = (ui.available_width() - 110.0).max(80.0);
                     let mut pos = pv.pos;
-                    let r = ui.add(egui::Slider::new(&mut pos, 0.0..=len.max(0.01)).show_value(false));
+                    let r = ui.add(egui::Slider::new(&mut pos, lo..=hi.max(lo + 0.01)).show_value(false));
                     if r.drag_started() {
                         pv.resume = pv.playing();
                         pv.stop();
@@ -225,13 +249,24 @@ pub fn window(ctx: &Context, app: &mut EditorApp) {
             ui.horizontal(|ui| {
                 let info = match m.kind {
                     MediaKind::Image => format!("Image · {}×{}", m.width, m.height),
-                    MediaKind::Audio => format!("Audio · {}", widgets::format_time(len)),
+                    MediaKind::Audio => format!("Audio · {}", widgets::format_time(m.duration)),
                     MediaKind::Video => format!("Video · {}×{} · {:.2} fps{}", m.width, m.height, m.fps, if m.has_audio { " · with audio" } else { " · no sound" }),
                 };
+                let info = match &pv.clip {
+                    Some(_) => format!("{info} · {} · plays {}–{} of the file", m.name, widgets::format_time(lo), widgets::format_time(hi)),
+                    None => info,
+                };
                 ui.label(widgets::dim(info).small());
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.add_enabled(m.path.exists(), Button::new("➕ Add to timeline")).clicked() {
-                        add = true;
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| match &pv.clip {
+                    Some((clip, _)) => {
+                        if ui.button("📍 Show in timeline").clicked() {
+                            locate = Some(*clip);
+                        }
+                    }
+                    None => {
+                        if ui.add_enabled(m.path.exists(), Button::new("➕ Add to timeline")).clicked() {
+                            add = true;
+                        }
                     }
                 });
             });
@@ -244,5 +279,16 @@ pub fn window(ctx: &Context, app: &mut EditorApp) {
     app.media_preview = pv;
     if add {
         app.add_media_to_timeline(id);
+    }
+    if let Some(clip) = locate {
+        show_in_timeline(app, clip);
+    }
+}
+
+/// Selects a clip and moves the playhead to its start.
+pub fn show_in_timeline(app: &mut EditorApp, clip: Id) {
+    if let Some(start) = app.project.clip(clip).map(|c| c.start) {
+        app.selection = Some(clip);
+        app.seek(start);
     }
 }

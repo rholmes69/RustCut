@@ -65,6 +65,7 @@ pub struct EditorApp {
     pub reshoot: ui::reshoot::ReshootUi,
     pub replace: ui::replace::ReplaceUi,
     pub media_preview: ui::media_preview::MediaPreview,
+    pub clip_board: ui::clip_board::ClipBoard,
     pub rough_cut: ui::rough_cut::RoughCutUi,
     pub toast: Option<Toast>,
     pub ffmpeg_ok: bool,
@@ -113,6 +114,7 @@ impl EditorApp {
             reshoot: Default::default(),
             replace: Default::default(),
             media_preview: Default::default(),
+            clip_board: Default::default(),
             rough_cut: Default::default(),
             toast: None,
             ffmpeg_ok: ffmpeg::is_available(),
@@ -751,6 +753,7 @@ impl eframe::App for EditorApp {
         ui::voice::window(ctx, self);
         ui::reshoot::window(ctx, self);
         ui::replace::window(ctx, self);
+        ui::clip_board::window(ctx, self);
         ui::media_preview::window(ctx, self);
         ui::rough_cut::window(ctx, self);
 

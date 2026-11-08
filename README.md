@@ -18,6 +18,7 @@ decoding and rendering, offline, no account, no watermark.
 ## Features
 - Import video, images and audio (dialog or drag & drop) with thumbnails and waveforms
 - Multi-track timeline: move across tracks, trim both edges, split, duplicate, delete, snapping, zoom, lock/hide/mute
+- **Timeline storyboard**: Edit → 🎞 Timeline storyboard… shows every video and image clip on the timeline as numbered tiles in play order (a frame from the middle of each cut, its time, length and lyric line); click to jump there, double-click or 👁 to preview just that clip, right-click to replace or reshoot it. Timeline clips also have 👁 Preview clip in their right-click menu
 - **Preview library items**: right-click a video, image or audio item in the media library → 👁 Preview plays it (with sound) or shows it in a window, with play/pause (Space), a scrubber and Add to timeline; Esc closes it
 - **Replace clip**: right-click a clip → Replace clip… swaps it, or every clip that uses the same media (all cuts of a reused shot), for another library item; each clip keeps its timing, effects, keyframes and transition
 - **Reference shots (Seedance 2.0)**: one new shot from a prompt that tags up to 9 reference images as `@Image1`…`@Image9` (character sheets, an animal, a location); the MCP tool `reference_shot` (dry run first) adds the video to the media library

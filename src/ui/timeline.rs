@@ -30,6 +30,7 @@ enum ClipMenu {
     LipSync,
     Reshoot,
     Replace,
+    Preview,
 }
 
 fn track_height(kind: TrackKind) -> f32 {
@@ -463,6 +464,10 @@ fn lanes(ui: &mut Ui, app: &mut EditorApp) {
                 body_resp.context_menu(|ui| {
                     ui.set_min_width(210.0);
                     let mut pick = |a: ClipMenu| menu_action = Some((id, a));
+                    if visual && ui.button("👁  Preview clip").clicked() {
+                        pick(ClipMenu::Preview);
+                        ui.close_menu();
+                    }
                     if ui.add_enabled(can_split, Button::new("✂  Split at playhead")).clicked() {
                         pick(ClipMenu::Split);
                         ui.close_menu();
@@ -625,6 +630,11 @@ fn lanes(ui: &mut Ui, app: &mut EditorApp) {
     if let Some((id, action)) = menu_action {
         app.selection = Some(id);
         match action {
+            ClipMenu::Preview => {
+                let name = app.project.clip(id).and_then(|c| c.media_id()).and_then(|m| app.project.media(m)).map(|m| m.name.clone()).unwrap_or_default();
+                let start = app.project.clip(id).map_or(0.0, |c| c.start);
+                crate::ui::media_preview::open_clip(&ctx, app, id, format!("{} · {name}", crate::ui::widgets::format_time(start)));
+            }
             ClipMenu::Split => app.split_at_playhead(),
             ClipMenu::Duplicate => app.duplicate_selection(),
             ClipMenu::Delete => app.delete_selection(),
