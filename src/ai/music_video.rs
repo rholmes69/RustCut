@@ -748,7 +748,9 @@ total spent: ${:.3}", sb.dir.display(), sb.spent);
                 let client = Client::from_settings(&settings).expect("OpenRouter key");
                 match std::env::var("MV_STILL") {
                     Err(_) => {
-                        let (frame, cost) = crate::ai::reshoot::draw(&client, &mut sb, &settings.image_model, None).unwrap();
+                        // MV_LOOK=<a frame of the video> keeps the lead's look as she appears in it.
+                        let look = std::env::var("MV_LOOK").ok().map(std::path::PathBuf::from);
+                        let (frame, cost) = crate::ai::reshoot::draw(&client, &mut sb, &settings.image_model, look.as_deref()).unwrap();
                         println!("still: {} (${cost:.3})", frame.display());
                     }
                     Ok(still) => {
@@ -760,6 +762,25 @@ total spent: ${:.3}", sb.dir.display(), sb.spent);
                         println!("video: {} ({:.1} s, ${:.3})", g.path.display(), g.info.duration, g.cost.unwrap_or(0.0));
                     }
                 }
+            }
+            "t2v" => {
+                // A text-only b-roll shot (no cast): MV_PROMPT_FILE=… [MV_SECONDS=6 MV_VIDEO_MODEL=… MV_DRY=1]
+                let prompt = std::fs::read_to_string(std::env::var("MV_PROMPT_FILE").expect("MV_PROMPT_FILE")).unwrap().trim().to_string();
+                let seconds: f64 = std::env::var("MV_SECONDS").ok().and_then(|s| s.parse().ok()).unwrap_or(6.0);
+                let client = Client::from_settings(&settings).expect("OpenRouter key");
+                let model_id = std::env::var("MV_VIDEO_MODEL").unwrap_or_else(|_| "kwaivgi/kling-v3.0-std".into());
+                let m = crate::ai::video_gen::list_models(&client).unwrap().into_iter().find(|m| m.id == model_id).expect("video model");
+                let p = Project::load(&project_path).unwrap();
+                let (w, h) = p.aspect.size_for(720);
+                let (duration, resolution, aspect) = (m.pick_duration(seconds), "720p".to_string(), m.pick_aspect(w as f64, h as f64));
+                println!("{model_id} · {duration} s · {resolution} · {aspect} · estimate {:?}", crate::ai::video_gen::estimate_cost(&m, duration, &resolution, &aspect, false, false));
+                if std::env::var("MV_DRY").is_ok() {
+                    return;
+                }
+                let req = crate::ai::video_gen::GenRequest { model: model_id, prompt: prompt.clone(), duration, resolution, aspect_ratio: aspect, generate_audio: false, first_frame: None, last_frame: None };
+                let out = dir.join("RustCut AI").join("new shots").join(crate::ai::video_gen::slug(&prompt));
+                let g = crate::ai::video_gen::generate(&client, &req, &out, "shot", &cancel, &mut |p, s| if (p * 100.0) as i32 % 20 == 0 { println!("  {s}") }).unwrap().unwrap();
+                println!("video: {} ({:.2} s, {}x{}, ${:.3})", g.path.display(), g.info.duration, g.info.width, g.info.height, g.cost.unwrap_or(0.0));
             }
             "sheet" => {
                 // A character reference sheet from a description: MV_SHEET_NAME="Saivon" MV_SHEET_PROMPT="…"
