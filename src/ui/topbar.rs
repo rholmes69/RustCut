@@ -112,6 +112,46 @@ pub fn show(ctx: &Context, app: &mut EditorApp) {
                         app.delete_selection();
                         ui.close_menu();
                     }
+                    if ui.add_enabled(has_sel, egui::Button::new("Ripple delete       Shift+Del")).on_hover_text("Delete and close the gap on the track").clicked() {
+                        app.ripple_delete_selection();
+                        ui.close_menu();
+                    }
+                    if ui.button("🧊 Freeze frame at playhead (2 s)").clicked() {
+                        if let Err(e) = app.freeze_frame(None, 2.0) {
+                            app.notify_error(e);
+                        }
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    ui.menu_button("🚩 Markers", |ui| {
+                        ui.set_min_width(230.0);
+                        if ui.button("Add marker at playhead          M").clicked() {
+                            app.add_marker_at_playhead();
+                            ui.close_menu();
+                        }
+                        if ui.button("Previous marker           Alt+Left").clicked() {
+                            app.jump_marker(-1);
+                            ui.close_menu();
+                        }
+                        if ui.button("Next marker                Alt+Right").clicked() {
+                            app.jump_marker(1);
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        if ui.button("🎵 Markers from song sections").clicked() {
+                            app.markers_from_sections();
+                            ui.close_menu();
+                        }
+                        if ui.add_enabled(!app.project.markers.is_empty(), egui::Button::new("📋 Copy YouTube chapters")).clicked() {
+                            let ctx = ui.ctx().clone();
+                            app.copy_chapters(&ctx);
+                            ui.close_menu();
+                        }
+                        if ui.add_enabled(!app.project.markers.is_empty(), egui::Button::new("Clear all markers")).clicked() {
+                            app.project.markers.clear();
+                            ui.close_menu();
+                        }
+                    });
                 });
                 ui.menu_button("Music", |ui| crate::ui::music::menu(ui, app));
                 ui.menu_button("AI", |ui| {

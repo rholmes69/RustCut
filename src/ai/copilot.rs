@@ -59,6 +59,20 @@ pub fn app_tools() -> Vec<Value> {
         f("select_clip", "Select a clip (the Inspector shows it) and move the playhead to its start.", json!({ "clip_id": { "type": "integer" } }), &["clip_id"]),
         f("preview_clip", "Open a preview window that plays just this clip.", json!({ "clip_id": { "type": "integer" } }), &["clip_id"]),
         f("split_at_playhead", "Split the clip under the playhead (the selected one if it's there).", json!({}), &[]),
+        f("ripple_delete", "Delete a clip and close the gap it leaves (later clips on its track move left).", json!({ "clip_id": { "type": "integer" } }), &["clip_id"]),
+        f(
+            "freeze_frame",
+            "Hold one frame of a video clip as a still for some seconds; the rest of the track moves later.",
+            json!({ "clip_id": { "type": "integer", "description": "default: the clip under the playhead" },
+                    "time": { "type": "number", "description": "timeline seconds of the frame; default: the playhead" },
+                    "seconds": { "type": "number", "description": "how long to hold it, default 2" } }),
+            &[],
+        ),
+        f("add_marker", "Add a named marker (chapter / cue point) on the timeline.", json!({ "time": { "type": "number", "description": "default: the playhead" }, "name": { "type": "string" } }), &["name"]),
+        f("go_to_marker", "Move the playhead to the marker whose name best matches.", json!({ "name": { "type": "string" } }), &["name"]),
+        f("delete_marker", "Delete the marker whose name best matches (or all markers with name \"all\").", json!({ "name": { "type": "string" } }), &["name"]),
+        f("markers_from_sections", "Replace the markers with one per song section (Verse 1, Chorus, Bridge…).", json!({}), &[]),
+        f("copy_chapters", "Copy the markers as a YouTube chapter list to the clipboard and return it.", json!({}), &[]),
         f("undo", "Undo the last edit.", json!({}), &[]),
         f("redo", "Redo.", json!({}), &[]),
         f("save_project", "Save the project to its file.", json!({}), &[]),
@@ -112,7 +126,7 @@ pub fn quick_command(text: &str) -> Option<Vec<(String, Value)>> {
     // Whisper ends sentences with a period: "Play it." (keep decimals like "1.5").
     let mut words: Vec<&str> = t.split_whitespace().map(|w| w.trim_end_matches('.')).filter(|w| !w.is_empty()).collect();
     // "please", "rustcut", "hey copilot" and trailing "it/that/now" don't change the meaning.
-    words.retain(|w| !matches!(*w, "please" | "rustcut" | "copilot" | "hey" | "ok" | "okay" | "now"));
+    words.retain(|w| !matches!(*w, "please" | "rustcut" | "copilot" | "hey" | "ok" | "okay" | "now" | "no" | "oops"));
     while words.last().is_some_and(|w| matches!(*w, "it" | "that" | "this" | "the" | "video" | "project" | "here")) && words.len() > 1 {
         words.pop();
     }
@@ -126,6 +140,11 @@ pub fn quick_command(text: &str) -> Option<Vec<(String, Value)>> {
         "save" | "save project" => return one("save_project"),
         "split" | "split here" | "cut here" | "split clip" | "split the clip" => return one("split_at_playhead"),
         "export" | "export video" | "render" => return Some(vec![("open_window".into(), json!({ "window": "export" }))]),
+        "add marker" | "add a marker" | "marker" | "mark" | "drop a marker" => return Some(vec![("add_marker".into(), json!({ "name": "" }))]),
+        "next marker" | "next chapter" => return Some(vec![("go_to_marker".into(), json!({ "name": "", "dir": 1 }))]),
+        "previous marker" | "last marker" | "previous chapter" => return Some(vec![("go_to_marker".into(), json!({ "name": "", "dir": -1 }))]),
+        "freeze frame" | "freeze" | "freeze this frame" => return one("freeze_frame"),
+        "ripple delete" => return one("ripple_delete"),
         "show storyboard" | "timeline storyboard" | "storyboard" => {
             return Some(vec![("open_window".into(), json!({ "window": "timeline_storyboard" }))]);
         }
@@ -323,13 +342,89 @@ fn clean(s: &str) -> String {
     out.trim().to_string()
 }
 
+/// True while the Copilot is talking (hands-free listening ignores the mic then,
+/// so it doesn't hear itself).
+static SPEAKING: AtomicBool = AtomicBool::new(false);
+
+pub fn is_speaking() -> bool {
+    SPEAKING.load(Ordering::Relaxed)
+}
+
+/// What a hands-free utterance means.
+#[derive(Debug, PartialEq)]
+pub enum Heard {
+    /// A request (wake word removed).
+    Command(String),
+    /// Just the wake word: listen for the request.
+    Wake,
+    /// "that's all", "thanks": stop taking follow-ups without the wake word.
+    Done,
+    /// "stop listening", "go to sleep": turn hands-free off.
+    Sleep,
+    /// Not for us.
+    Ignore,
+}
+
+/// Wake words as Whisper tends to write them (one word or two).
+const WAKE: &[&[&str]] = &[
+    &["copilot"], &["co", "pilot"], &["copilots"], &["rustcut"], &["rust", "cut"], &["russ", "cut"],
+    &["rest", "cut"], &["rush", "cut"], &["rustcat"], &["rust", "cat"], &["rascut"],
+];
+
+/// Interprets a hands-free utterance. `following` = right after a reply or the wake
+/// word, when no wake word is needed.
+pub fn hands_free(text: &str, following: bool) -> Heard {
+    let norm = |w: &str| w.to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect::<String>();
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let low: Vec<String> = words.iter().map(|w| norm(w)).collect();
+    let plain = low.iter().filter(|w| !w.is_empty()).cloned().collect::<Vec<_>>().join(" ");
+    if ["stop listening", "go to sleep", "goodbye copilot", "goodbye rustcut", "hands free off"].iter().any(|p| plain.contains(p)) {
+        return Heard::Sleep;
+    }
+    // Skip a leading "hey" / "ok", then look for the wake word in the first few words.
+    let mut found = None;
+    'outer: for start in 0..low.len().min(3) {
+        for w in WAKE {
+            if low.len() >= start + w.len() && w.iter().zip(&low[start..]).all(|(a, b)| a == b) {
+                let lead_ok = low[..start].iter().all(|x| matches!(x.as_str(), "hey" | "ok" | "okay" | "hi" | "yo" | ""));
+                if lead_ok {
+                    found = Some(start + w.len());
+                    break 'outer;
+                }
+            }
+        }
+    }
+    let rest = match found {
+        Some(i) => words[i..].join(" "),
+        None if following => text.trim().to_string(),
+        None => return Heard::Ignore,
+    };
+    let rest = rest.trim_start_matches([',', '.', '!', '?', ' ']).trim().to_string();
+    let r = norm(&rest.replace(' ', ""));
+    if r.is_empty() {
+        return if found.is_some() { Heard::Wake } else { Heard::Ignore };
+    }
+    if ["thatsall", "thanks", "thankyou", "nevermind", "thatsit", "nothing", "allgood", "imdone"].contains(&r.as_str()) {
+        return Heard::Done;
+    }
+    Heard::Command(rest)
+}
+
 /// Says `text` with the system voice (Windows speech synthesis), without blocking.
 pub fn speak(text: &str) {
     let text: String = text.chars().filter(|c| !matches!(c, '*' | '#' | '`' | '_')).take(400).collect();
     if text.trim().is_empty() || !cfg!(windows) {
         return;
     }
+    SPEAKING.store(true, Ordering::Relaxed);
     std::thread::spawn(move || {
+        struct Done;
+        impl Drop for Done {
+            fn drop(&mut self) {
+                SPEAKING.store(false, Ordering::Relaxed);
+            }
+        }
+        let _done = Done;
         // The text goes in an environment variable, never into the script itself.
         let _ = crate::media::ffmpeg::command("powershell")
             .args(["-NoProfile", "-NonInteractive", "-Command", "Add-Type -AssemblyName System.Speech; (New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak($env:RUSTCUT_SAY)"])
@@ -367,6 +462,19 @@ mod tests {
         assert_eq!(names("split here"), Some(vec![("split_at_playhead".into(), -1.0)]));
         assert_eq!(names("add a title that says hello"), None);
         assert_eq!(names("go to the kitchen scene"), None);
+    }
+
+    #[test]
+    fn hands_free_wake_words() {
+        assert_eq!(hands_free("Copilot, add a marker called Chorus.", false), Heard::Command("add a marker called Chorus.".into()));
+        assert_eq!(hands_free("Hey Rust Cut play it", false), Heard::Command("play it".into()));
+        assert_eq!(hands_free("Copilot.", false), Heard::Wake);
+        assert_eq!(hands_free("so then we went to the store", false), Heard::Ignore);
+        assert_eq!(hands_free("make the title bigger", true), Heard::Command("make the title bigger".into()));
+        assert_eq!(hands_free("Thanks.", true), Heard::Done);
+        assert_eq!(hands_free("Okay, stop listening.", false), Heard::Sleep);
+        assert_eq!(names("no, undo that"), Some(vec![("undo".into(), -1.0)]));
+        assert_eq!(names("Next marker."), Some(vec![("go_to_marker".into(), -1.0)]));
     }
 
     #[test]

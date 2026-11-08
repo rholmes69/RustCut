@@ -320,6 +320,94 @@ impl EditorApp {
         }
     }
 
+    /// Deletes the selected clip and closes the gap on its track.
+    pub fn ripple_delete_selection(&mut self) {
+        if let Some(id) = self.selection.take() {
+            self.project.ripple_delete(id);
+            self.project.cleanup_tracks();
+        }
+    }
+
+    /// Freezes the frame under the playhead on `clip` (or the clip at the playhead)
+    /// for `len` seconds; the rest of the track moves later. Returns the still's id.
+    pub fn freeze_frame(&mut self, clip: Option<Id>, len: f64) -> Result<Id, String> {
+        let id = clip.or_else(|| self.clip_at_playhead()).ok_or("Move the playhead over a video clip")?;
+        let c = self.project.clip(id).ok_or("That clip no longer exists")?.clone();
+        let m = c.media_id().and_then(|m| self.project.media(m)).cloned().ok_or("Freeze frame needs a video clip")?;
+        if m.kind != crate::model::MediaKind::Video {
+            return Err("Freeze frame needs a video clip".into());
+        }
+        let t = self.playhead.clamp(c.start, c.end());
+        let src = c.source_time(t).clamp(0.0, (m.duration - 0.04).max(0.0));
+        let dir = match &self.project_path {
+            Some(p) => p.parent().map(|d| d.join("RustCut AI").join("freeze frames")).unwrap_or_default(),
+            None => crate::util::config_dir().join("freeze frames"),
+        };
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let stem = m.path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "frame".into());
+        let out = dir.join(format!("{stem}-{:.2}s.png", src));
+        let ok = crate::media::ffmpeg::command(&crate::media::ffmpeg::ffmpeg_bin())
+            .args(["-hide_banner", "-loglevel", "error", "-y", "-ss", &format!("{src:.3}"), "-i"])
+            .arg(&m.path)
+            .args(["-frames:v", "1"])
+            .arg(&out)
+            .status()
+            .is_ok_and(|s| s.success());
+        if !ok || !out.is_file() {
+            return Err("FFmpeg couldn't grab that frame".into());
+        }
+        let image = self.project.add_media(crate::model::MediaItem {
+            id: 0,
+            path: out.clone(),
+            name: out.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default(),
+            kind: crate::model::MediaKind::Image,
+            duration: 0.0,
+            width: m.width,
+            height: m.height,
+            fps: 0.0,
+            has_audio: false,
+        });
+        let still = self.project.insert_freeze(id, t, image, len).ok_or("Couldn't insert the freeze frame")?;
+        self.selection = Some(still);
+        Ok(still)
+    }
+
+    /// Adds a marker at the playhead, numbered after the existing ones.
+    pub fn add_marker_at_playhead(&mut self) {
+        let name = format!("Marker {}", self.project.markers.len() + 1);
+        let i = self.project.add_marker(self.playhead, name);
+        self.timeline.editing_marker = Some(i);
+    }
+
+    pub fn jump_marker(&mut self, dir: i32) {
+        match self.project.marker_near(self.playhead, dir).map(|m| m.time) {
+            Some(t) => {
+                self.seek(t);
+                self.timeline.reveal = Some(t);
+            }
+            None => self.notify(if dir > 0 { "No marker after the playhead" } else { "No marker before the playhead" }),
+        }
+    }
+
+    /// Replaces the markers with one per song section ("Verse 1", "Chorus", …).
+    pub fn markers_from_sections(&mut self) -> usize {
+        let n = self.project.markers_from_sections();
+        if n == 0 {
+            self.notify("No song sections yet — run Music → Detect beats, or add lyrics with [Verse]/[Chorus] headers");
+            return 0;
+        }
+        self.notify(format!("Added {} markers from the song sections", self.project.markers.len()));
+        self.project.markers.len()
+    }
+
+    /// Copies the YouTube chapter list to the clipboard.
+    pub fn copy_chapters(&mut self, ctx: &Context) -> String {
+        let text = self.project.chapters();
+        ctx.copy_text(text.clone());
+        self.notify("YouTube chapters copied — paste them into the video description");
+        text
+    }
+
     pub fn duplicate_selection(&mut self) {
         if let Some(id) = self.selection {
             self.selection = self.project.duplicate_clip(id).or(Some(id));
@@ -474,6 +562,9 @@ impl EditorApp {
             Step(f64),
             Home,
             End,
+            RippleDelete,
+            Marker,
+            MarkerJump(i32),
         }
         let mut actions = Vec::new();
         let dt = self.frame_dt();
@@ -507,11 +598,23 @@ impl EditorApp {
             if i.consume_key(Modifiers::COMMAND, Key::D) {
                 actions.push(A::Duplicate);
             }
+            if i.consume_key(Modifiers::SHIFT, Key::Delete) || i.consume_key(Modifiers::SHIFT, Key::Backspace) {
+                actions.push(A::RippleDelete);
+            }
             if i.consume_key(Modifiers::NONE, Key::Delete) || i.consume_key(Modifiers::NONE, Key::Backspace) {
                 actions.push(A::Delete);
             }
             if i.consume_key(Modifiers::NONE, Key::Space) {
                 actions.push(A::Play);
+            }
+            if i.consume_key(Modifiers::NONE, Key::M) {
+                actions.push(A::Marker);
+            }
+            if i.consume_key(Modifiers::ALT, Key::ArrowLeft) {
+                actions.push(A::MarkerJump(-1));
+            }
+            if i.consume_key(Modifiers::ALT, Key::ArrowRight) {
+                actions.push(A::MarkerJump(1));
             }
             if i.consume_key(Modifiers::SHIFT, Key::ArrowLeft) {
                 actions.push(A::Step(-1.0));
@@ -544,6 +647,9 @@ impl EditorApp {
                 A::Split => self.split_at_playhead(),
                 A::Duplicate => self.duplicate_selection(),
                 A::Delete => self.delete_selection(),
+                A::RippleDelete => self.ripple_delete_selection(),
+                A::Marker => self.add_marker_at_playhead(),
+                A::MarkerJump(d) => self.jump_marker(d),
                 A::Play => self.toggle_play(),
                 A::Step(d) => self.seek(self.playhead + d),
                 A::Home => {

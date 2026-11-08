@@ -990,6 +990,16 @@ pub struct Project {
     /// Beat/section analysis per media id (music videos).
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub music: std::collections::BTreeMap<Id, crate::music::MusicAnalysis>,
+    /// Named points on the timeline, in time order (chapters, notes, cue points).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub markers: Vec<Marker>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Marker {
+    /// Timeline seconds.
+    pub time: f64,
+    pub name: String,
 }
 
 impl Default for Project {
@@ -1004,6 +1014,7 @@ impl Default for Project {
             audio: AudioMix::default(),
             thumbnail: None,
             music: Default::default(),
+            markers: Vec::new(),
         }
     }
 }
@@ -1444,6 +1455,120 @@ impl Project {
         id
     }
 
+    // ── markers ──────────────────────────────────────────────────────────────
+
+    /// Adds a marker (or renames the one already within 0.05 s). Returns its index.
+    pub fn add_marker(&mut self, time: f64, name: impl Into<String>) -> usize {
+        let time = time.max(0.0);
+        let name = name.into();
+        if let Some(i) = self.markers.iter().position(|m| (m.time - time).abs() < 0.05) {
+            self.markers[i].name = name;
+            return i;
+        }
+        let i = self.markers.partition_point(|m| m.time < time);
+        self.markers.insert(i, Marker { time, name });
+        i
+    }
+
+    /// The marker strictly after (`dir > 0`) or before `t`.
+    pub fn marker_near(&self, t: f64, dir: i32) -> Option<&Marker> {
+        if dir > 0 {
+            self.markers.iter().find(|m| m.time > t + 0.01)
+        } else {
+            self.markers.iter().rev().find(|m| m.time < t - 0.01)
+        }
+    }
+
+    /// YouTube chapter list ("0:00 Intro" lines). YouTube needs the first at 0:00,
+    /// so one is added when the first marker is later.
+    pub fn chapters(&self) -> String {
+        let stamp = |t: f64| {
+            let t = t.max(0.0) as u64;
+            if t >= 3600 { format!("{}:{:02}:{:02}", t / 3600, t / 60 % 60, t % 60) } else { format!("{}:{:02}", t / 60, t % 60) }
+        };
+        let mut lines = Vec::new();
+        if self.markers.first().is_none_or(|m| m.time >= 1.0) {
+            lines.push(format!("0:00 {}", if self.markers.is_empty() { "Start" } else { "Intro" }));
+        }
+        for m in &self.markers {
+            let name = if m.name.trim().is_empty() { "Chapter" } else { m.name.trim() };
+            lines.push(format!("{} {name}", stamp(m.time)));
+        }
+        lines.join("
+")
+    }
+
+    /// Replaces the markers with one per song section ("Verse 1", "Chorus", ...).
+    /// Returns how many were added (0 = the song has no sections yet).
+    pub fn markers_from_sections(&mut self) -> usize {
+        // Chapters, not fragments: merge neighbours with the same label and fold very
+        // short sections (loudness guesses can be choppy) into the one before.
+        let mut sections: Vec<crate::music::SectionMark> = Vec::new();
+        for s in crate::music::timeline_sections(self) {
+            match sections.last_mut() {
+                // Same label: only join fragments (a long chorus followed by another
+                // chorus is a real repeat, e.g. from lyric headers).
+                Some(prev) if s.end - s.start < 8.0 || (prev.label.eq_ignore_ascii_case(&s.label) && prev.end - prev.start < 20.0) => prev.end = s.end,
+                _ => sections.push(s),
+            }
+        }
+        if sections.is_empty() {
+            return 0;
+        }
+        let mut counts = std::collections::HashMap::<String, usize>::new();
+        for s in &sections {
+            *counts.entry(s.label.to_lowercase()).or_default() += 1;
+        }
+        let mut seen = std::collections::HashMap::<String, usize>::new();
+        self.markers.clear();
+        for s in &sections {
+            let key = s.label.to_lowercase();
+            let n = seen.entry(key.clone()).or_default();
+            *n += 1;
+            let mut name = s.label.trim().to_string();
+            if let Some(f) = name.get_mut(0..1) {
+                f.make_ascii_uppercase();
+            }
+            // Number repeated sections, except choruses (they read better unnumbered)
+            // and labels that already carry a number ("Verse 2").
+            let numbered = name.chars().last().is_some_and(|c| c.is_ascii_digit());
+            if counts[&key] > 1 && key != "chorus" && !numbered {
+                name = format!("{name} {n}");
+            }
+            self.add_marker(s.start, name);
+        }
+        self.markers.len()
+    }
+
+    /// Deletes a clip and closes the gap it leaves on its track (later clips on the
+    /// same track move left). Returns the length removed.
+    pub fn ripple_delete(&mut self, id: Id) -> Option<f64> {
+        let (ti, ci) = self.locate(id)?;
+        let c = self.tracks[ti].clips.remove(ci);
+        let (end, len) = (c.end(), c.duration);
+        for o in self.tracks[ti].clips.iter_mut().filter(|o| o.start >= end - EPS) {
+            o.start -= len;
+        }
+        Some(len)
+    }
+
+    /// Freeze frame: splits `id` at `t` and pushes a still (`image`, already in the
+    /// library) of `len` seconds in between, moving the rest of the track later.
+    /// Returns the still's clip id.
+    pub fn insert_freeze(&mut self, id: Id, t: f64, image: Id, len: f64) -> Option<Id> {
+        let (ti, _) = self.locate(id)?;
+        let c = self.clip(id)?;
+        let at = if t >= c.end() - MIN_CLIP_LEN { c.end() } else if t <= c.start + MIN_CLIP_LEN { c.start } else {
+            self.split_clip(id, t)?;
+            t
+        };
+        let base = self.clip(id)?.transform;
+        let mut still = self.new_media_clip(image, at)?;
+        still.duration = len.max(MIN_CLIP_LEN);
+        still.transform = base;
+        Some(self.ripple_insert(ti, at, still))
+    }
+
     /// If a clip overlaps a neighbour, move it to another track (creating one if needed).
     pub fn resolve_overlap(&mut self, id: Id) {
         let Some((ti, ci)) = self.locate(id) else { return };
@@ -1569,6 +1694,51 @@ impl Project {
 
 #[cfg(test)]
 mod tests {
+        /// Manual: `MARKERS_PROJECT=song.rcproj cargo test --lib markers_live -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn markers_live() {
+        let Ok(path) = std::env::var("MARKERS_PROJECT") else { return };
+        let mut p = Project::load(std::path::Path::new(&path)).unwrap();
+        for s in crate::music::timeline_sections(&p) {
+            println!("  raw {:>7.1}-{:>7.1} {}", s.start, s.end, s.label);
+        }
+        println!("{} markers from sections:
+{}", p.markers_from_sections(), p.chapters());
+    }
+
+    #[test]
+    fn markers_chapters_ripple_and_freeze() {
+        let mut p = Project::default();
+        p.add_marker(65.0, "Chorus");
+        p.add_marker(20.0, "Verse 1");
+        assert_eq!(p.add_marker(20.02, "Verse one"), 0);
+        assert_eq!(p.markers.len(), 2);
+        assert_eq!(p.chapters(), "0:00 Intro
+0:20 Verse one
+1:05 Chorus");
+        assert_eq!(p.marker_near(20.0, 1).unwrap().name, "Chorus");
+        assert_eq!(p.marker_near(20.0, -1), None);
+
+        let img = p.add_media(MediaItem { id: 0, path: "a.png".into(), name: "a".into(), kind: MediaKind::Image, duration: 0.0, width: 10, height: 10, fps: 0.0, has_audio: false });
+        let main = p.main_track();
+        let mut ids = Vec::new();
+        for i in 0..3 {
+            let mut c = p.new_media_clip(img, i as f64 * 2.0).unwrap();
+            c.duration = 2.0;
+            ids.push(c.id);
+            p.tracks[main].clips.push(c);
+        }
+        assert_eq!(p.ripple_delete(ids[1]), Some(2.0));
+        assert_eq!(p.clip(ids[2]).unwrap().start, 2.0);
+
+        let still = p.insert_freeze(ids[0], 1.0, img, 1.5).unwrap();
+        let starts: Vec<f64> = p.tracks[main].clips.iter().map(|c| c.start).collect();
+        assert_eq!(starts, vec![0.0, 1.0, 2.5, 3.5]);
+        assert_eq!(p.clip(still).unwrap().duration, 1.5);
+        assert_eq!(p.duration(), 5.5);
+    }
+
     use super::*;
 
     fn video(p: &mut Project, dur: f64) -> Id {

@@ -31,6 +31,8 @@ enum ClipMenu {
     Reshoot,
     Replace,
     Preview,
+    Freeze,
+    RippleDelete,
 }
 
 fn track_height(kind: TrackKind) -> f32 {
@@ -71,11 +73,16 @@ pub struct TimelineState {
     body_width: f32,
     /// Scroll so this time is visible on the next frame.
     pub reveal: Option<f64>,
+    /// Marker whose name is being edited (just added, or Rename… from its menu).
+    pub editing_marker: Option<usize>,
+    /// The ruler's right-click menu: the marker under the pointer, else where it opened.
+    menu_marker: Option<usize>,
+    menu_time: f64,
 }
 
 impl Default for TimelineState {
     fn default() -> Self {
-        Self { pps: 60.0, scroll_x: 0.0, scroll_y: 0.0, snap: true, drag: None, snap_guide: None, body_width: 800.0, reveal: None }
+        Self { pps: 60.0, scroll_x: 0.0, scroll_y: 0.0, snap: true, drag: None, snap_guide: None, body_width: 800.0, reveal: None, editing_marker: None, menu_marker: None, menu_time: 0.0 }
     }
 }
 
@@ -476,6 +483,16 @@ fn lanes(ui: &mut Ui, app: &mut EditorApp) {
                         pick(ClipMenu::Duplicate);
                         ui.close_menu();
                     }
+                    let video = media.is_some_and(|m| m.kind == MediaKind::Video);
+                    if video
+                        && ui
+                            .add_enabled(clip.is_active(playhead), Button::new("🧊  Freeze frame at playhead (2 s)"))
+                            .on_hover_text("Holds the frame under the playhead; the rest of the track moves later")
+                            .clicked()
+                    {
+                        pick(ClipMenu::Freeze);
+                        ui.close_menu();
+                    }
                     if let Some(m) = media {
                         let uses = uses_of.get(&m.id).copied().unwrap_or(1);
                         let label = if uses > 1 { format!("🔁  Replace clip… ({uses} uses)") } else { "🔁  Replace clip…".to_string() };
@@ -541,6 +558,10 @@ fn lanes(ui: &mut Ui, app: &mut EditorApp) {
                     ui.separator();
                     if ui.button(RichText::new("🗑  Delete").color(theme::DANGER)).clicked() {
                         pick(ClipMenu::Delete);
+                        ui.close_menu();
+                    }
+                    if ui.button(RichText::new("⇤  Ripple delete (close the gap)   Shift+Del").color(theme::DANGER)).clicked() {
+                        pick(ClipMenu::RippleDelete);
                         ui.close_menu();
                     }
                 });
@@ -638,6 +659,12 @@ fn lanes(ui: &mut Ui, app: &mut EditorApp) {
             ClipMenu::Split => app.split_at_playhead(),
             ClipMenu::Duplicate => app.duplicate_selection(),
             ClipMenu::Delete => app.delete_selection(),
+            ClipMenu::RippleDelete => app.ripple_delete_selection(),
+            ClipMenu::Freeze => {
+                if let Err(e) = app.freeze_frame(Some(id), 2.0) {
+                    app.notify_error(e);
+                }
+            }
             ClipMenu::Extend => app.video_gen.extend_target = Some(id),
             ClipMenu::Reframe => crate::ui::ai::start_reframe(app, &ctx, vec![id]),
             ClipMenu::Beats => {
@@ -768,13 +795,114 @@ fn lanes(ui: &mut Ui, app: &mut EditorApp) {
             }
         }
     }
+    // Markers: amber flags on the ruler and a faint line through the lanes.
+    const MARKER: Color32 = Color32::from_rgb(255, 184, 48);
+    let hover_x = ctx.input(|i| i.pointer.hover_pos()).filter(|p| ruler.contains(*p)).map(|p| p.x);
+    let mut hovered_marker = None;
+    for (i, m) in app.project.markers.iter().enumerate() {
+        let x = t2x(m.time);
+        if x < ruler.left() - 6.0 || x > ruler.right() + 6.0 {
+            continue;
+        }
+        let hot = hover_x.is_some_and(|hx| (hx - x).abs() <= 6.0);
+        if hot {
+            hovered_marker = Some(i);
+        }
+        rp.add(Shape::convex_polygon(
+            vec![pos2(x - 5.0, ruler.top()), pos2(x + 5.0, ruler.top()), pos2(x + 5.0, ruler.top() + 7.0), pos2(x, ruler.top() + 12.0), pos2(x - 5.0, ruler.top() + 7.0)],
+            if hot { Color32::WHITE } else { MARKER },
+            Stroke::NONE,
+        ));
+        body_painter.line_segment([pos2(x, body.top()), pos2(x, body.bottom())], Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(255, 184, 48, 60)));
+        let next_x = app.project.markers.get(i + 1).map_or(f32::INFINITY, |n| t2x(n.time));
+        if next_x - x > 50.0 {
+            let galley = rp.layout_no_wrap(m.name.clone(), FontId::proportional(9.5), Color32::BLACK);
+            let w = galley.size().x.min(next_x - x - 14.0);
+            let r = Rect::from_min_size(pos2(x + 6.0, ruler.top() + 1.0), egui::vec2(w + 6.0, 12.0));
+            rp.rect_filled(r, 2.0, MARKER);
+            rp.with_clip_rect(r).galley(pos2(r.left() + 3.0, r.top()), galley, Color32::BLACK);
+        }
+    }
     let ruler_resp = ui.interact(ruler, ui.id().with("tl-ruler"), Sense::click_and_drag());
     if ruler_resp.clicked() || ruler_resp.dragged() {
         if let Some(p) = ruler_resp.interact_pointer_pos() {
             if app.playing {
                 app.pause();
             }
-            app.seek(x2t(p.x).max(0.0));
+            // Clicking a flag lands exactly on the marker.
+            let t = match hovered_marker.filter(|_| ruler_resp.clicked()) {
+                Some(i) => app.project.markers[i].time,
+                None => x2t(p.x).max(0.0),
+            };
+            app.seek(t);
+        }
+    }
+    if hovered_marker.is_some() && ruler_resp.double_clicked() {
+        app.timeline.editing_marker = hovered_marker;
+    }
+    if ruler_resp.secondary_clicked() {
+        app.timeline.menu_marker = hovered_marker;
+        app.timeline.menu_time = ruler_resp.interact_pointer_pos().map(|p| x2t(p.x).max(0.0)).unwrap_or(0.0);
+    }
+    ruler_resp.context_menu(|ui| {
+        ui.set_min_width(190.0);
+        match app.timeline.menu_marker.filter(|i| *i < app.project.markers.len()) {
+            Some(i) => {
+                ui.label(RichText::new(&app.project.markers[i].name).strong());
+                if ui.button("\u{270f}  Rename\u{2026}").clicked() {
+                    app.timeline.editing_marker = Some(i);
+                    ui.close_menu();
+                }
+                if ui.button(RichText::new("\u{1f5d1}  Delete marker").color(theme::DANGER)).clicked() {
+                    app.project.markers.remove(i);
+                    ui.close_menu();
+                }
+            }
+            None => {
+                if ui.button("\u{1f6a9}  Add marker here").clicked() {
+                    let t = app.timeline.menu_time;
+                    let i = app.project.add_marker(t, format!("Marker {}", app.project.markers.len() + 1));
+                    app.timeline.editing_marker = Some(i);
+                    ui.close_menu();
+                }
+            }
+        }
+        ui.separator();
+        if ui.button("\u{1f3b5}  Markers from song sections").clicked() {
+            app.markers_from_sections();
+            ui.close_menu();
+        }
+        if ui.add_enabled(!app.project.markers.is_empty(), Button::new("\u{1f4cb}  Copy YouTube chapters")).clicked() {
+            let ctx = ui.ctx().clone();
+            app.copy_chapters(&ctx);
+            ui.close_menu();
+        }
+        if ui.add_enabled(!app.project.markers.is_empty(), Button::new("Clear all markers")).clicked() {
+            app.project.markers.clear();
+            ui.close_menu();
+        }
+    });
+    // Renaming a marker: a small box under its flag.
+    if let Some(i) = app.timeline.editing_marker {
+        if i >= app.project.markers.len() {
+            app.timeline.editing_marker = None;
+        } else {
+            let x = t2x(app.project.markers[i].time).clamp(ruler.left(), (ruler.right() - 170.0).max(ruler.left()));
+            let mut done = false;
+            egui::Area::new(ui.id().with("marker-rename")).order(egui::Order::Foreground).fixed_pos(pos2(x, ruler.bottom() + 2.0)).show(&ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    let r = ui.add(egui::TextEdit::singleline(&mut app.project.markers[i].name).desired_width(160.0).hint_text("Marker name"));
+                    if r.lost_focus() {
+                        done = true;
+                    } else if !r.has_focus() {
+                        r.request_focus();
+                    }
+                    ui.label(crate::ui::widgets::dim("Enter to finish").small());
+                });
+            });
+            if done {
+                app.timeline.editing_marker = None;
+            }
         }
     }
     if ruler_resp.hovered() {
@@ -872,6 +1000,7 @@ fn lanes(ui: &mut Ui, app: &mut EditorApp) {
 fn snap_points(project: &Project, exclude: Id, playhead: f64) -> Vec<f64> {
     let mut pts = vec![0.0, playhead];
     pts.extend(crate::music::timeline_beats(project).iter().map(|b| b.time));
+    pts.extend(project.markers.iter().map(|m| m.time));
     for c in project.tracks.iter().flat_map(|t| &t.clips).filter(|c| c.id != exclude) {
         pts.push(c.start);
         pts.push(c.end());

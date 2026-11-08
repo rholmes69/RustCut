@@ -1,7 +1,7 @@
 //! "✨ Copilot" window: type or speak to control the editor. Ctrl+Space talks from
 //! anywhere. See `ai::copilot` for the model loop and `ai::listen` for the microphone.
 
-use crate::ai::copilot::{self, Event, WINDOWS};
+use crate::ai::copilot::{self, Event, Heard, WINDOWS};
 use crate::ai::listen::Recorder;
 use crate::app::EditorApp;
 use crate::captions;
@@ -14,6 +14,10 @@ use serde_json::Value;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+/// How long follow-ups work without the wake word.
+const FOLLOW_UP: Duration = Duration::from_secs(8);
 
 #[derive(Clone, Copy, PartialEq)]
 enum Who {
@@ -55,6 +59,16 @@ pub struct CopilotUi {
     spent: f64,
     focus_input: bool,
     show_settings: bool,
+    /// Always listening for "Copilot, ..." / "RustCut, ...".
+    pub hands_free: bool,
+    /// The open recorder is the hands-free one (not push-to-talk).
+    rec_hf: bool,
+    /// The running transcription came from hands-free listening.
+    hearing_hf: bool,
+    /// Until then, a hands-free request needs no wake word (just after a reply).
+    follow_until: Option<Instant>,
+    /// Open the follow-up window once the spoken reply has finished.
+    follow_pending: bool,
 }
 
 impl CopilotUi {
@@ -114,6 +128,15 @@ fn state(app: &EditorApp) -> String {
         }
         None => s.push_str("no clip selected\n"),
     }
+    if !p.markers.is_empty() {
+        let list: Vec<String> = p.markers.iter().take(40).map(|m| format!("{} at {:.2} s", m.name, m.time)).collect();
+        s.push_str(&format!("markers: {}\n", list.join("; ")));
+    }
+    let sections = crate::music::timeline_sections(p);
+    if !sections.is_empty() {
+        let list: Vec<String> = sections.iter().take(30).map(|x| format!("{} {:.1}–{:.1}", x.label, x.start, x.end)).collect();
+        s.push_str(&format!("song sections (s): {}\n", list.join(", ")));
+    }
     s
 }
 
@@ -156,6 +179,72 @@ fn app_tool(ctx: &Context, app: &mut EditorApp, name: &str, a: &Value) -> Option
                 Err("nothing to split under the playhead".into())
             }
         }
+        "ripple_delete" => {
+            let Some(c) = a["clip_id"].as_u64().map(|v| v as Id).or(app.selection) else {
+                return Some(Err("say which clip (or select one)".into()));
+            };
+            match app.project.ripple_delete(c) {
+                Some(len) => {
+                    app.project.cleanup_tracks();
+                    Ok(format!("deleted clip {c} and closed the {len:.2} s gap"))
+                }
+                None => Err(format!("no clip with id {c}")),
+            }
+        }
+        "freeze_frame" => {
+            if let Some(t) = a["time"].as_f64() {
+                app.seek(t);
+            }
+            let secs = a["seconds"].as_f64().unwrap_or(2.0).clamp(0.2, 30.0);
+            app.freeze_frame(a["clip_id"].as_u64().map(|v| v as Id), secs).map(|id| format!("froze the frame for {secs} s (new still clip {id})"))
+        }
+        "add_marker" => {
+            let t = a["time"].as_f64().unwrap_or(app.playhead);
+            let name = a["name"].as_str().unwrap_or("").trim();
+            let name = if name.is_empty() { format!("Marker {}", app.project.markers.len() + 1) } else { name.to_string() };
+            app.project.add_marker(t, name.clone());
+            Ok(format!("added marker \"{name}\" at {}", widgets::format_time(t)))
+        }
+        "go_to_marker" => {
+            let dir = a["dir"].as_i64().unwrap_or(0) as i32;
+            let found = if dir != 0 {
+                app.project.marker_near(app.playhead, dir).cloned()
+            } else {
+                find_marker(&app.project.markers, a["name"].as_str().unwrap_or("")).map(|i| app.project.markers[i].clone())
+            };
+            match found {
+                Some(m) => {
+                    app.seek(m.time);
+                    app.timeline.reveal = Some(m.time);
+                    Ok(format!("at marker \"{}\"", m.name))
+                }
+                None => Err("no matching marker".into()),
+            }
+        }
+        "delete_marker" => {
+            let name = a["name"].as_str().unwrap_or("");
+            if name.eq_ignore_ascii_case("all") {
+                let n = app.project.markers.len();
+                app.project.markers.clear();
+                Ok(format!("deleted {n} markers"))
+            } else {
+                match find_marker(&app.project.markers, name) {
+                    Some(i) => Ok(format!("deleted marker \"{}\"", app.project.markers.remove(i).name)),
+                    None => Err("no matching marker".into()),
+                }
+            }
+        }
+        "markers_from_sections" => match app.markers_from_sections() {
+            0 => Err("the song has no sections yet (detect beats or add lyrics with [Verse]/[Chorus] headers)".into()),
+            n => Ok(format!("added {n} markers from the song sections")),
+        },
+        "copy_chapters" => {
+            if app.project.markers.is_empty() {
+                Err("there are no markers yet".into())
+            } else {
+                Ok(format!("copied to the clipboard:\n{}", app.copy_chapters(ctx)))
+            }
+        }
         "undo" => {
             app.undo();
             Ok("undone".into())
@@ -193,6 +282,22 @@ fn app_tool(ctx: &Context, app: &mut EditorApp, name: &str, a: &Value) -> Option
         _ => return None,
     };
     Some(r)
+}
+
+/// The marker whose name best matches `name` (exact, then contains, then shared words).
+fn find_marker(markers: &[crate::model::Marker], name: &str) -> Option<usize> {
+    let q = name.trim().to_lowercase();
+    if q.is_empty() {
+        return None;
+    }
+    let n = |i: usize| markers[i].name.to_lowercase();
+    (0..markers.len())
+        .find(|&i| n(i) == q)
+        .or_else(|| (0..markers.len()).find(|&i| n(i).contains(&q) || q.contains(&n(i))))
+        .or_else(|| {
+            let words: Vec<&str> = q.split_whitespace().collect();
+            (0..markers.len()).max_by_key(|&i| words.iter().filter(|w| n(i).contains(**w)).count()).filter(|&i| words.iter().any(|w| n(i).contains(*w)))
+        })
 }
 
 fn run_tool(ctx: &Context, app: &mut EditorApp, name: &str, args: &Value) -> Result<String, String> {
@@ -250,6 +355,7 @@ pub fn submit(ctx: &Context, app: &mut EditorApp, text: String) {
             }
             app.copilot.say(Who::Ai, reply);
         }
+        app.copilot.follow_pending = app.copilot.hands_free;
         return;
     }
     let backend = match copilot::backend(&app.ai.settings) {
@@ -269,6 +375,12 @@ pub fn submit(ctx: &Context, app: &mut EditorApp, text: String) {
 }
 
 fn start_listening(app: &mut EditorApp) {
+    // Hands-free is already listening: treat the shortcut like the wake word.
+    if app.copilot.hands_free {
+        app.copilot.open = true;
+        app.copilot.follow_until = Some(Instant::now() + FOLLOW_UP);
+        return;
+    }
     if app.copilot.rec.is_some() || app.copilot.busy() {
         return;
     }
@@ -289,14 +401,19 @@ fn speech_model() -> Option<std::path::PathBuf> {
 
 fn stop_listening(ctx: &Context, app: &mut EditorApp) {
     let Some(rec) = app.copilot.rec.take() else { return };
+    let hf = std::mem::take(&mut app.copilot.rec_hf);
     if !rec.heard_speech() {
-        app.copilot.say(Who::Error, "I didn't hear anything — check the microphone, or type instead.");
+        if !hf {
+            app.copilot.say(Who::Error, "I didn't hear anything — check the microphone, or type instead.");
+        }
         return;
     }
     let Some(model) = speech_model() else {
         app.copilot.say(Who::Error, "Voice needs a speech model: download one in the Captions panel (Base is recommended), then try again.");
+        app.copilot.hands_free = false;
         return;
     };
+    app.copilot.hearing_hf = hf;
     let wav = std::env::temp_dir().join(format!("rustcut-voice-{}.wav", std::process::id()));
     let secs = match rec.finish(&wav) {
         Ok(s) => s,
@@ -321,15 +438,41 @@ pub fn poll(ctx: &Context, app: &mut EditorApp) {
             start_listening(app);
         }
     }
+    // Hands-free: keep a recorder open whenever nothing else is happening.
+    let cp = &mut app.copilot;
+    if cp.hands_free && cp.rec.is_none() && cp.hearing.is_none() {
+        match Recorder::start_hands_free() {
+            Ok(r) => {
+                cp.rec = Some(r);
+                cp.rec_hf = true;
+            }
+            Err(e) => {
+                cp.hands_free = false;
+                cp.say(Who::Error, format!("Microphone: {e:#}"));
+            }
+        }
+    }
+    if cp.follow_pending && !copilot::is_speaking() {
+        cp.follow_pending = false;
+        cp.follow_until = Some(Instant::now() + FOLLOW_UP);
+    }
+    if cp.follow_until.is_some_and(|t| Instant::now() > t) {
+        cp.follow_until = None;
+    }
     if let Some(rec) = &mut app.copilot.rec {
-        ctx.request_repaint();
-        if rec.should_stop() {
+        ctx.request_repaint_after(Duration::from_millis(30));
+        if app.copilot.rec_hf && copilot::is_speaking() {
+            // Don't listen to our own voice.
+            rec.discard();
+        } else if rec.should_stop() {
             stop_listening(ctx, app);
         }
     }
     if let Some(state) = app.copilot.hearing.as_ref().and_then(|t| t.take_finished()) {
         app.copilot.hearing = None;
+        let hf = std::mem::take(&mut app.copilot.hearing_hf);
         match state {
+            TaskState::Done(text) if hf => heard_hands_free(ctx, app, &text),
             TaskState::Done(text) if !text.trim().is_empty() => submit(ctx, app, text),
             TaskState::Done(_) => app.copilot.say(Who::Error, "I couldn't make out any words — try again a little closer to the mic."),
             TaskState::Failed(e) => app.copilot.say(Who::Error, format!("Speech recognition: {e}")),
@@ -361,12 +504,54 @@ pub fn poll(ctx: &Context, app: &mut EditorApp) {
                 app.copilot.history = history;
                 app.copilot.spent += usd;
                 app.copilot.job = None;
+                app.copilot.follow_pending = app.copilot.hands_free;
             }
             Event::Failed(e) => {
                 app.copilot.say(Who::Error, e);
                 app.copilot.job = None;
             }
         }
+    }
+}
+
+/// A hands-free utterance: act on it if it starts with the wake word (or follows a reply).
+fn heard_hands_free(ctx: &Context, app: &mut EditorApp, text: &str) {
+    let following = app.copilot.follow_until.is_some();
+    let reply = |app: &mut EditorApp, t: &str| {
+        if app.ai.settings.copilot_speak {
+            copilot::speak(t);
+        }
+        app.copilot.say(Who::Ai, t);
+    };
+    match copilot::hands_free(text, following) {
+        Heard::Command(c) => {
+            app.copilot.follow_until = None;
+            if let Some(job) = &app.copilot.job {
+                // Busy: only "stop" / "cancel" mean something now.
+                let w = c.to_lowercase();
+                if ["stop", "cancel", "never mind", "wait"].iter().any(|k| w.contains(k)) {
+                    job.cancel.store(true, Ordering::Relaxed);
+                }
+                return;
+            }
+            submit(ctx, app, c);
+        }
+        Heard::Wake => {
+            reply(app, "Yes?");
+            app.copilot.follow_pending = true;
+        }
+        Heard::Done => {
+            app.copilot.follow_until = None;
+            reply(app, "Okay.");
+        }
+        Heard::Sleep => {
+            app.copilot.hands_free = false;
+            app.copilot.rec = None;
+            app.copilot.rec_hf = false;
+            app.copilot.follow_until = None;
+            reply(app, "Hands-free is off.");
+        }
+        Heard::Ignore => {}
     }
 }
 
@@ -390,6 +575,23 @@ pub fn window(ctx: &Context, app: &mut EditorApp) {
                     ui.label(widgets::dim(format!("· ${:.4} this session", app.copilot.spent)).small());
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let hf = app.copilot.hands_free;
+                    let label = RichText::new("👂 Hands-free").color(if hf { theme::ACCENT } else { theme::TEXT_DIM });
+                    if ui
+                        .selectable_label(hf, label)
+                        .on_hover_text("Always listening: say \"Copilot, …\" (or \"RustCut, …\"). Right after a reply you can just keep talking. Say \"stop listening\" to turn it off.")
+                        .clicked()
+                    {
+                        let cp = &mut app.copilot;
+                        cp.hands_free = !hf;
+                        cp.rec = None;
+                        cp.rec_hf = false;
+                        cp.follow_until = None;
+                        if cp.hands_free && speech_model().is_none() {
+                            cp.hands_free = false;
+                            cp.say(Who::Error, "Hands-free needs a speech model: download one in the Captions panel first.");
+                        }
+                    }
                     if ui.small_button("⚙").on_hover_text("Copilot settings").clicked() {
                         app.copilot.show_settings ^= true;
                     }
@@ -426,7 +628,23 @@ pub fn window(ctx: &Context, app: &mut EditorApp) {
             });
             ui.separator();
 
-            if let Some(rec) = &app.copilot.rec {
+            if let (true, Some(rec)) = (app.copilot.rec_hf, &app.copilot.rec) {
+                let level = (rec.level() * 12.0).clamp(0.0, 1.0);
+                ui.horizontal(|ui| {
+                    let text = if copilot::is_speaking() {
+                        "🔊 Speaking…"
+                    } else if app.copilot.follow_until.is_some() {
+                        "💬 Go ahead — no need to say \"Copilot\""
+                    } else if app.copilot.job.is_some() {
+                        "👂 Working… say \"Copilot, stop\" to cancel"
+                    } else {
+                        "👂 Say \"Copilot, …\""
+                    };
+                    ui.label(RichText::new(text).color(theme::ACCENT));
+                    ui.add(egui::ProgressBar::new(level).desired_width(ui.available_width()));
+                });
+            }
+            if let (false, Some(rec)) = (app.copilot.rec_hf, &app.copilot.rec) {
                 let level = (rec.level() * 12.0).clamp(0.0, 1.0);
                 ui.horizontal(|ui| {
                     if ui.add(Button::new(RichText::new("⏹ Done").color(Color32::WHITE)).fill(theme::DANGER)).clicked() {
@@ -485,6 +703,8 @@ pub fn window(ctx: &Context, app: &mut EditorApp) {
             j.cancel.store(true, Ordering::Relaxed);
         }
         app.copilot.rec = None;
+        app.copilot.rec_hf = false;
+        app.copilot.hands_free = false;
     }
 }
 

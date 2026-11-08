@@ -16,6 +16,9 @@ const TRAILING_SILENCE: Duration = Duration::from_millis(1300);
 /// Give up waiting for speech after this long.
 const NO_SPEECH: Duration = Duration::from_secs(6);
 const MAX_LEN: Duration = Duration::from_secs(30);
+/// Hands-free: a shorter pause ends an utterance, and utterances are capped.
+const HF_SILENCE: Duration = Duration::from_millis(900);
+const HF_MAX_LEN: Duration = Duration::from_secs(10);
 
 pub struct Recorder {
     _stream: cpal::Stream,
@@ -24,10 +27,22 @@ pub struct Recorder {
     level: Arc<AtomicU32>,
     started: Instant,
     last_speech: Option<Instant>,
+    /// Hands-free: wait for speech forever (keeping a short pre-roll) and cap each
+    /// utterance at a few seconds, so a wake word is caught even over music.
+    hands_free: bool,
 }
 
 impl Recorder {
     pub fn start() -> Result<Self> {
+        Self::open(false)
+    }
+
+    /// Always-on listening for a wake word (see `hands_free`).
+    pub fn start_hands_free() -> Result<Self> {
+        Self::open(true)
+    }
+
+    fn open(hands_free: bool) -> Result<Self> {
         let host = cpal::default_host();
         let device = host.default_input_device().ok_or_else(|| anyhow!("no microphone found"))?;
         let config = device.default_input_config().context("the microphone has no usable format")?;
@@ -70,7 +85,7 @@ impl Recorder {
         }
         .context("could not open the microphone")?;
         stream.play().context("could not start the microphone")?;
-        Ok(Self { _stream: stream, samples, rate, level, started: Instant::now(), last_speech: None })
+        Ok(Self { _stream: stream, samples, rate, level, started: Instant::now(), last_speech: None, hands_free })
     }
 
     /// Current input level, 0..1 (RMS).
@@ -93,10 +108,38 @@ impl Recorder {
         if self.level() > SPEECH {
             self.last_speech = Some(now);
         }
+        if self.hands_free {
+            return match self.last_speech {
+                Some(t) => now - t > HF_SILENCE || now - self.speech_began(t) > HF_MAX_LEN,
+                None => {
+                    // Nothing said yet: keep only a short pre-roll so the first word isn't clipped.
+                    let keep = self.rate as usize / 2;
+                    let mut buf = self.samples.lock().unwrap();
+                    if buf.len() > keep * 4 {
+                        let cut = buf.len() - keep;
+                        buf.drain(..cut);
+                    }
+                    self.started = now;
+                    false
+                }
+            };
+        }
         match self.last_speech {
             Some(t) => now - t > TRAILING_SILENCE || self.elapsed() > MAX_LEN,
             None => self.elapsed() > NO_SPEECH,
         }
+    }
+
+    /// When the current utterance started (hands-free: `started` resets while idle).
+    fn speech_began(&self, _last: Instant) -> Instant {
+        self.started
+    }
+
+    /// Throws away what was recorded so far (e.g. the Copilot's own voice).
+    pub fn discard(&mut self) {
+        self.samples.lock().unwrap().clear();
+        self.last_speech = None;
+        self.started = Instant::now();
     }
 
     /// Stops recording and writes a 16 kHz mono WAV. Returns its length in seconds.
