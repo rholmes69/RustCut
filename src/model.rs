@@ -171,6 +171,36 @@ impl Default for Adjust {
     }
 }
 
+/// Colour grade applied after the filter and adjustments: a 3D LUT blended by
+/// `lut_mix`, then per-channel `gain` and `offset` (0..1 colour units).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Grade {
+    pub lut: Option<PathBuf>,
+    pub lut_mix: f32,
+    pub gain: [f32; 3],
+    pub offset: [f32; 3],
+}
+
+impl Default for Grade {
+    fn default() -> Self {
+        Self { lut: None, lut_mix: 1.0, gain: [1.0; 3], offset: [0.0; 3] }
+    }
+}
+
+impl Grade {
+    pub fn is_identity(&self) -> bool {
+        (self.lut.is_none() || self.lut_mix < 1e-3)
+            && self.gain.iter().all(|g| (g - 1.0).abs() < 1e-3)
+            && self.offset.iter().all(|o| o.abs() < 1e-3)
+    }
+
+    /// Only the gain/offset part (colour match) is non-neutral.
+    pub fn has_balance(&self) -> bool {
+        self.gain.iter().any(|g| (g - 1.0).abs() >= 1e-3) || self.offset.iter().any(|o| o.abs() >= 1e-3)
+    }
+}
+
 impl Adjust {
     pub fn is_identity(&self) -> bool {
         self.brightness.abs() < 1e-3
@@ -723,6 +753,9 @@ pub struct Clip {
     pub fade_out: f64,
     pub filter: FilterPreset,
     pub adjust: Adjust,
+    /// LUT and colour balance (colour match), after `filter` and `adjust`.
+    #[serde(default, skip_serializing_if = "Grade::is_identity")]
+    pub grade: Grade,
     /// A video file used only for its sound (detached audio).
     #[serde(default)]
     pub audio_only: bool,
@@ -767,6 +800,7 @@ impl Clip {
             fade_out: 0.0,
             filter: FilterPreset::None,
             adjust: Adjust::default(),
+            grade: Grade::default(),
             audio_only: false,
             keyframes: BTreeMap::new(),
             transition_in: None,

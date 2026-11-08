@@ -33,6 +33,8 @@ enum ClipMenu {
     Preview,
     Freeze,
     RippleDelete,
+    ColorRef,
+    ColorMatch,
 }
 
 fn track_height(kind: TrackKind) -> f32 {
@@ -421,6 +423,7 @@ fn lanes(ui: &mut Ui, app: &mut EditorApp) {
     let mut clicked: Option<Id> = None;
     let mut menu_action: Option<(Id, ClipMenu)> = None;
     let playhead = app.playhead;
+    let color_ref = app.color.reference;
     let mut start_drag: Option<(Id, DragMode, f32)> = None;
     let mut hover_cursor: Option<CursorIcon> = None;
     {
@@ -492,6 +495,17 @@ fn lanes(ui: &mut Ui, app: &mut EditorApp) {
                     {
                         pick(ClipMenu::Freeze);
                         ui.close_menu();
+                    }
+                    if visual {
+                        let is_ref = color_ref == Some(id);
+                        if ui.button(if is_ref { "🎯  Colour reference ✓" } else { "🎯  Use as colour reference" }).clicked() {
+                            pick(ClipMenu::ColorRef);
+                            ui.close_menu();
+                        }
+                        if ui.add_enabled(color_ref.is_some_and(|r| r != id), Button::new("🎨  Match colour to reference")).clicked() {
+                            pick(ClipMenu::ColorMatch);
+                            ui.close_menu();
+                        }
                     }
                     if let Some(m) = media {
                         let uses = uses_of.get(&m.id).copied().unwrap_or(1);
@@ -660,6 +674,12 @@ fn lanes(ui: &mut Ui, app: &mut EditorApp) {
             ClipMenu::Duplicate => app.duplicate_selection(),
             ClipMenu::Delete => app.delete_selection(),
             ClipMenu::RippleDelete => app.ripple_delete_selection(),
+            ClipMenu::ColorRef => app.color.reference = if app.color.reference == Some(id) { None } else { Some(id) },
+            ClipMenu::ColorMatch => {
+                if let Err(e) = crate::ui::color::start_match(app, &ctx, vec![id]) {
+                    app.notify_error(e);
+                }
+            }
             ClipMenu::Freeze => {
                 if let Err(e) = app.freeze_frame(Some(id), 2.0) {
                     app.notify_error(e);

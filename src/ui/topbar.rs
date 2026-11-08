@@ -89,6 +89,10 @@ pub fn show(ctx: &Context, app: &mut EditorApp) {
                         app.clip_board.open = true;
                         ui.close_menu();
                     }
+                    if ui.button("📊 Scopes (histogram, waveform, vectorscope)…").clicked() {
+                        app.color.scopes_open = true;
+                        ui.close_menu();
+                    }
                     ui.separator();
                     if ui.add_enabled(app.history.can_undo(), egui::Button::new("Undo                  Ctrl+Z")).clicked() {
                         app.undo();

@@ -2,6 +2,7 @@
 //! what you see is what you export.
 
 pub mod filters;
+pub mod grade;
 pub mod text;
 
 /// Size of a layer in canvas pixels: the media is fitted inside the canvas

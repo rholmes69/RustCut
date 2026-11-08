@@ -73,6 +73,25 @@ pub fn app_tools() -> Vec<Value> {
         f("delete_marker", "Delete the marker whose name best matches (or all markers with name \"all\").", json!({ "name": { "type": "string" } }), &["name"]),
         f("markers_from_sections", "Replace the markers with one per song section (Verse 1, Chorus, Bridge…).", json!({}), &[]),
         f("copy_chapters", "Copy the markers as a YouTube chapter list to the clipboard and return it.", json!({}), &[]),
+        f(
+            "set_look",
+            "Give clips a colour look (3D LUT): a built-in look or a .cube file, with a strength. Use look \"none\" to remove it.",
+            json!({ "look": { "type": "string", "description": format!("one of: {}, none, or a path to a .cube file", crate::render::grade::BUILTIN.iter().map(|b| b.0).collect::<Vec<_>>().join(", ")) },
+                    "strength": { "type": "number", "description": "0..1, default 1" },
+                    "clip_ids": { "type": "array", "items": { "type": "integer" }, "description": "default: the selected clip" },
+                    "whole_track": { "type": "boolean", "description": "apply to every video/image clip on the track of the (first) clip" },
+                    "everything": { "type": "boolean", "description": "apply to every video/image clip in the project" } }),
+            &["look"],
+        ),
+        f("set_colour_reference", "Make a clip the colour reference that other clips are matched to.", json!({ "clip_id": { "type": "integer" } }), &["clip_id"]),
+        f(
+            "match_colour",
+            "Colour-match clips to the reference clip (evens out shots with different looks). Runs in the background.",
+            json!({ "clip_ids": { "type": "array", "items": { "type": "integer" } },
+                    "whole_track": { "type": "boolean", "description": "every video/image clip on the reference's track" },
+                    "strength": { "type": "number", "description": "0.2..1, default 0.8" } }),
+            &[],
+        ),
         f("undo", "Undo the last edit.", json!({}), &[]),
         f("redo", "Redo.", json!({}), &[]),
         f("save_project", "Save the project to its file.", json!({}), &[]),
@@ -99,6 +118,7 @@ pub const WINDOWS: &[(&str, &str)] = &[
     ("lyrics", "Lyrics"),
     ("beat_montage", "Beat montage"),
     ("costs", "Cost report"),
+    ("scopes", "Colour scopes (histogram, waveform, vectorscope)"),
     ("ai_settings", "OpenRouter settings"),
 ];
 

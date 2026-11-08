@@ -216,6 +216,7 @@ fn layer_filters(
         // Colour first (constant frame size), then a per-frame scale inside a fixed
         // transparent box so downstream filters see a constant size.
         chain.extend(filters::ffmpeg_filters(clip.filter, &clip.adjust));
+        chain.extend(crate::render::grade::ffmpeg_filter(&clip.grade, work_dir, tag)?);
         chain.extend(effect_filters(clip, canvas.0.min(canvas.1), fps, work_dir, local_start, len, tag)?);
         let s = prop_expr(clip, Prop::Scale, var);
         let smax = clip.keyframes[&Prop::Scale].iter().map(|k| k.value).fold(0.01f32, f32::max) as f64;
@@ -232,6 +233,7 @@ fn layer_filters(
         let s = clip.transform.scale as f64;
         chain.push(format!("scale={}:{}", even(fw * s), even(fh * s)));
         chain.extend(filters::ffmpeg_filters(clip.filter, &clip.adjust));
+        chain.extend(crate::render::grade::ffmpeg_filter(&clip.grade, work_dir, tag)?);
         chain.extend(effect_filters(clip, canvas.0.min(canvas.1), fps, work_dir, local_start, len, tag)?);
         chain.push("format=rgba".into());
     }
@@ -651,6 +653,21 @@ pub fn build_args(project: &Project, s: &ExportSettings, work_dir: &Path) -> Res
 /// re-timed, so keyframes, fades and transitions stay exact) and re-based to start
 /// near zero, which keeps this fast no matter how far into the timeline `t` is.
 pub fn render_frame_png(project: &Project, t: f64, short_side: u32) -> Result<Vec<u8>> {
+    render_frame_as(project, t, short_side, &["-c:v", "png", "-f", "image2pipe", "-"])
+}
+
+/// The finished frame at `t` (every track, grade and title, exactly as exported) as
+/// RGBA pixels: `(width, height, data)`.
+pub fn render_frame_rgba(project: &Project, t: f64, short_side: u32) -> Result<(u32, u32, Vec<u8>)> {
+    let (w, h) = project.aspect.size_for(short_side);
+    let data = render_frame_as(project, t, short_side, &["-pix_fmt", "rgba", "-f", "rawvideo", "-"])?;
+    if data.len() < (w * h * 4) as usize {
+        bail!("FFmpeg returned a short frame ({} bytes for {w}×{h})", data.len());
+    }
+    Ok((w, h, data[..(w * h * 4) as usize].to_vec()))
+}
+
+fn render_frame_as(project: &Project, t: f64, short_side: u32, output: &[&str]) -> Result<Vec<u8>> {
     const MARGIN: f64 = 3.0;
     let mut snap = project.clone();
     let (lo, hi) = (t - MARGIN, t + MARGIN);
@@ -679,7 +696,8 @@ pub fn render_frame_png(project: &Project, t: f64, short_side: u32) -> Result<Ve
             .args(&g.inputs)
             .args(filter_complex_args(g.filter.clone(), &work)?)
             .args(["-map", &format!("[{}]", g.video_label)])
-            .args(["-ss", &format!("{at:.4}"), "-frames:v", "1", "-c:v", "png", "-f", "image2pipe", "-"])
+            .args(["-ss", &format!("{at:.4}"), "-frames:v", "1"])
+            .args(output)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()

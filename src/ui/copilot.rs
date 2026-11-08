@@ -245,6 +245,25 @@ fn app_tool(ctx: &Context, app: &mut EditorApp, name: &str, a: &Value) -> Option
                 Ok(format!("copied to the clipboard:\n{}", app.copy_chapters(ctx)))
             }
         }
+        "set_look" => set_look(app, a),
+        "set_colour_reference" => id("clip_id").and_then(|c| {
+            if app.project.clip(c).is_none() {
+                return Err(format!("no clip with id {c}"));
+            }
+            app.color.reference = Some(c);
+            Ok(format!("clip {c} is the colour reference"))
+        }),
+        "match_colour" => {
+            if let Some(s) = a["strength"].as_f64() {
+                app.color.strength = (s as f32).clamp(0.2, 1.0);
+            }
+            let targets: Vec<Id> = if a["whole_track"].as_bool() == Some(true) {
+                app.color.reference.map(|r| crate::ui::color::track_pictures(&app.project, r)).unwrap_or_default()
+            } else {
+                a["clip_ids"].as_array().map(|v| v.iter().filter_map(|x| x.as_u64().map(|x| x as Id)).collect()).filter(|v: &Vec<Id>| !v.is_empty()).or_else(|| app.selection.map(|s| vec![s])).unwrap_or_default()
+            };
+            crate::ui::color::start_match(app, ctx, targets).map(|n| format!("matching {n} clip(s) to the reference in the background"))
+        }
         "undo" => {
             app.undo();
             Ok("undone".into())
@@ -274,6 +293,7 @@ fn app_tool(ctx: &Context, app: &mut EditorApp, name: &str, a: &Value) -> Option
                 "lyrics" => app.music.lyrics_open = true,
                 "beat_montage" => app.music.montage_open = true,
                 "costs" => app.economics.open = true,
+                "scopes" => app.color.scopes_open = true,
                 "ai_settings" => app.ai.open_settings(ctx),
                 _ => return Some(Err(format!("unknown window `{w}`; choose one of {}", WINDOWS.iter().map(|w| w.0).collect::<Vec<_>>().join(", ")))),
             }
@@ -282,6 +302,51 @@ fn app_tool(ctx: &Context, app: &mut EditorApp, name: &str, a: &Value) -> Option
         _ => return None,
     };
     Some(r)
+}
+
+/// `set_look`: a built-in look (by name), a .cube path or "none" on some clips.
+fn set_look(app: &mut EditorApp, a: &Value) -> Result<String, String> {
+    let look = a["look"].as_str().unwrap_or("").trim();
+    let strength = a["strength"].as_f64().map(|s| (s as f32).clamp(0.0, 1.0));
+    let lut = if look.is_empty() || look.eq_ignore_ascii_case("none") {
+        None
+    } else if let Some((name, _, _)) = crate::render::grade::BUILTIN.iter().find(|b| b.0.eq_ignore_ascii_case(look) || b.0.to_lowercase().replace(" & ", " and ") == look.to_lowercase()) {
+        Some(crate::render::grade::builtin_path(name).map_err(|e| e.to_string())?)
+    } else {
+        let p = std::path::PathBuf::from(look);
+        crate::render::grade::cached(&p).map_err(|e| format!("{e:#}"))?;
+        Some(p)
+    };
+    let pictures = |p: &crate::model::Project| -> Vec<Id> {
+        p.tracks.iter().flat_map(|t| &t.clips).filter(|c| !c.audio_only && c.media_id().and_then(|m| p.media(m)).is_some_and(|m| m.kind != crate::model::MediaKind::Audio)).map(|c| c.id).collect()
+    };
+    let mut ids: Vec<Id> = a["clip_ids"].as_array().map(|v| v.iter().filter_map(|x| x.as_u64().map(|x| x as Id)).collect()).unwrap_or_default();
+    if ids.is_empty() {
+        ids.extend(app.selection);
+    }
+    if a["everything"].as_bool() == Some(true) {
+        ids = pictures(&app.project);
+    } else if a["whole_track"].as_bool() == Some(true) {
+        ids = ids.first().map(|f| crate::ui::color::track_pictures(&app.project, *f)).unwrap_or_default();
+    }
+    let ids: Vec<Id> = ids.into_iter().filter(|i| pictures(&app.project).contains(i)).collect();
+    if ids.is_empty() {
+        return Err("no video or image clips to grade (select one, or pass clip_ids / everything)".into());
+    }
+    for i in &ids {
+        if let Some(c) = app.project.clip_mut(*i) {
+            c.grade.lut = lut.clone();
+            if let Some(s) = strength {
+                c.grade.lut_mix = s;
+            } else if lut.is_some() {
+                c.grade.lut_mix = 1.0;
+            }
+        }
+    }
+    Ok(match &lut {
+        Some(_) => format!("gave {} clip(s) the {look} look", ids.len()),
+        None => format!("removed the look from {} clip(s)", ids.len()),
+    })
 }
 
 /// The marker whose name best matches `name` (exact, then contains, then shared words).

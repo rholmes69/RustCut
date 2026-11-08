@@ -60,7 +60,7 @@ struct Slot {
     shown_time: Option<f64>,
     dirty: bool,
     texture: Option<TextureHandle>,
-    look: Option<(FilterPreset, Adjust)>,
+    look: Option<(FilterPreset, Adjust, crate::model::Grade)>,
     last_spawn: Option<Instant>,
 }
 
@@ -276,16 +276,17 @@ impl PreviewEngine {
 
     fn upload(ctx: &egui::Context, clip: &Clip, slot: &mut Slot) {
         let Some(raw) = &slot.raw else { return };
-        let look = (clip.filter, clip.adjust);
-        if !slot.dirty && slot.look == Some(look) {
+        let look = (clip.filter, clip.adjust, clip.grade.clone());
+        if !slot.dirty && slot.look.as_ref() == Some(&look) {
             return;
         }
         let size = [raw.width as usize, raw.height as usize];
-        let image = if filters::is_identity(look.0, &look.1) {
+        let image = if filters::is_identity(look.0, &look.1) && look.2.is_identity() {
             ColorImage::from_rgba_unmultiplied(size, &raw.data)
         } else {
             let mut data = (*raw.data).clone();
             filters::apply_cpu(&mut data, look.0, &look.1);
+            crate::render::grade::apply_cpu(&mut data, &look.2);
             ColorImage::from_rgba_unmultiplied(size, &data)
         };
         match &mut slot.texture {

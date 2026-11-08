@@ -469,6 +469,7 @@ fn clip_panel(ui: &mut Ui, app: &mut EditorApp, clip: Clip) {
                 c.filter = FilterPreset::None;
             }
         });
+        section(ui, "Colour grade", |ui| crate::ui::color::inspector_section(ui, app, &mut c));
     }
 
     ui.add_space(10.0);

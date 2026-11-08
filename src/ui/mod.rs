@@ -15,6 +15,7 @@ pub mod theme;
 pub mod timeline;
 pub mod video_gen;
 pub mod clip_board;
+pub mod color;
 pub mod copilot;
 pub mod media_preview;
 pub mod replace;
