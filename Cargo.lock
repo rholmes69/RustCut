@@ -3013,6 +3013,7 @@ version = "0.1.0"
 dependencies = [
  "ab_glyph",
  "anyhow",
+ "cpal",
  "eframe",
  "egui",
  "rfd",

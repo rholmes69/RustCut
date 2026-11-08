@@ -298,8 +298,41 @@ pub fn transcribe(
         bail!("speech model not found at {}", opts.model.display());
     }
     let work = ffmpeg::work_dir("captions")?;
-    let result = (|| -> Result<Option<Vec<Segment>>> {
-        let plan = plan_audio(project, source, &work)?;
+    let result = plan_audio(project, source, &work).and_then(|plan| run_plan(&plan, &work, opts, engine, cancel, &mut progress));
+    let _ = std::fs::remove_dir_all(&work);
+    result
+}
+
+/// Transcribes a short audio file (a voice command) and returns its text.
+/// `Ok(None)` if cancelled.
+pub fn transcribe_file(path: &Path, duration: f64, opts: &Options, engine: &Engine, cancel: &AtomicBool) -> Result<Option<String>> {
+    if !opts.model.is_file() {
+        bail!("speech model not found at {}", opts.model.display());
+    }
+    let work = ffmpeg::work_dir("voice-command")?;
+    let plan = AudioPlan {
+        inputs: vec!["-i".into(), path.to_string_lossy().into_owned()],
+        simple_chain: Some(Vec::new()),
+        graph: None,
+        duration,
+        offset: 0.0,
+        range: (0.0, duration.max(0.1)),
+    };
+    let result = run_plan(&plan, &work, opts, engine, cancel, &mut |_, _| {});
+    let _ = std::fs::remove_dir_all(&work);
+    Ok(result?.map(|segs| segs.into_iter().map(|s| s.text).collect::<Vec<_>>().join(" ").trim().to_string()))
+}
+
+fn run_plan(
+    plan: &AudioPlan,
+    work: &Path,
+    opts: &Options,
+    engine: &Engine,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(f32, &str),
+) -> Result<Option<Vec<Segment>>> {
+    {
+        let plan = plan;
         let lang = clean_language(&opts.language);
         let srt_path = work.join("captions.srt");
         match engine {
@@ -374,9 +407,7 @@ pub fn transcribe(
             })
             .collect();
         Ok(Some(segments))
-    })();
-    let _ = std::fs::remove_dir_all(&work);
-    result
+    }
 }
 
 /// Drops non-speech markers like `[BLANK_AUDIO]` or `(music)` and tidies whitespace.

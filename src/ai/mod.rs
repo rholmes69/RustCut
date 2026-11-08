@@ -1,8 +1,10 @@
 //! AI features powered by OpenRouter models.
 
+pub mod copilot;
 pub mod elevenlabs;
 pub mod image_gen;
 pub mod lipsync;
+pub mod listen;
 pub mod local;
 pub mod performance;
 pub mod reshoot;

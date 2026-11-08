@@ -49,6 +49,11 @@ pub struct AiSettings {
     /// true = re-generate the shot as a performance (Seedance 2.0); false = fix the mouth only.
     pub lipsync_performance: bool,
     pub performance_model: String,
+    /// Copilot (type or speak to control the editor): a cloud model through OpenRouter
+    /// instead of the local Ollama model, which model, and whether replies are spoken.
+    pub copilot_cloud: bool,
+    pub copilot_model: String,
+    pub copilot_speak: bool,
 }
 
 impl Default for AiSettings {
@@ -69,6 +74,9 @@ impl Default for AiSettings {
             lipsync_model: "lipsync-2".into(),
             lipsync_performance: false,
             performance_model: super::performance::MODELS[0].0.into(),
+            copilot_cloud: false,
+            copilot_model: DEFAULT_EDIT_MODEL.into(),
+            copilot_speak: true,
         }
     }
 }
@@ -331,6 +339,30 @@ impl Client {
             ..Default::default()
         });
         Ok((text, usage))
+    }
+
+    /// Chat that may answer with tool calls: returns the assistant message as sent
+    /// (`content`, `tool_calls`) plus usage. Recorded in the cost ledger.
+    pub fn chat_message(&self, body: &Value) -> Result<(Value, Usage)> {
+        let v = self.post("/chat/completions", body)?;
+        if let Some(err) = v.get("error") {
+            bail!("OpenRouter: {}", err["message"].as_str().unwrap_or("model error"));
+        }
+        let msg = v["choices"][0]["message"].clone();
+        if msg.is_null() {
+            bail!("OpenRouter: the model returned no message");
+        }
+        let usage = parse_usage(&v["usage"]);
+        crate::economics::record(crate::economics::Spend {
+            kind: "llm",
+            model: body["model"].as_str().unwrap_or("chat"),
+            usd: usage.cost,
+            units: (usage.prompt_tokens + usage.completion_tokens) as f64,
+            unit: "tokens",
+            note: "Copilot",
+            ..Default::default()
+        });
+        Ok((msg, usage))
     }
 
     /// Chat with a JSON-schema response format; returns the parsed JSON.

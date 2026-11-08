@@ -2732,6 +2732,79 @@ fn tool_definitions() -> Vec<Value> {
     ]
 }
 
+// ── in-app bridge (the Copilot) ──────────────────────────────────────────────
+
+/// Tools the in-app Copilot may run: free, local and quick. Paid generation, file
+/// switching and long renders stay in their own windows (the Copilot can open them).
+pub const COPILOT_TOOLS: &[&str] = &[
+    "get_project", "update_project", "import_media", "remove_media", "add_clip", "add_text", "update_clip",
+    "split_clip", "delete_clip", "duplicate_clip", "replace_media", "update_track", "set_keyframes",
+    "clear_keyframes", "auto_duck", "set_clip_audio", "detect_beats", "beat_montage", "beat_effect",
+    "add_visualizer", "audio_react", "best_section", "measure_loudness", "set_transition",
+    "apply_motion_preset", "export_srt", "export_lrc", "cost_report",
+];
+
+/// The everyday subset for small local models (fewer schemas = a much faster first token).
+pub const COPILOT_CORE_TOOLS: &[&str] = &[
+    "get_project", "update_project", "add_clip", "add_text", "update_clip", "split_clip", "delete_clip",
+    "duplicate_clip", "update_track", "set_keyframes", "set_transition", "apply_motion_preset",
+];
+
+/// The Copilot's editing tools in OpenAI / OpenRouter / Ollama function-calling form
+/// (`core` = only the everyday subset).
+pub fn copilot_tools(core: bool) -> Vec<Value> {
+    let allowed = if core { COPILOT_CORE_TOOLS } else { COPILOT_TOOLS };
+    tool_definitions()
+        .into_iter()
+        .filter(|t| t["name"].as_str().is_some_and(|n| allowed.contains(&n)))
+        .map(|t| {
+            json!({
+                "type": "function",
+                "function": { "name": t["name"], "description": t["description"], "parameters": t["inputSchema"] },
+            })
+        })
+        .collect()
+}
+
+/// Runs MCP tools against the editor's open project (swapped in for each call).
+pub struct Bridge {
+    server: Server<Vec<u8>>,
+}
+
+impl Default for Bridge {
+    fn default() -> Self {
+        Self { server: Server::new(Vec::new()) }
+    }
+}
+
+impl Bridge {
+    /// Runs one tool on `project`; returns the tool's text output (images are left out).
+    pub fn call(&mut self, project: &mut Project, path: Option<&Path>, name: &str, args: &Value) -> std::result::Result<String, String> {
+        if !COPILOT_TOOLS.contains(&name) {
+            return Err(format!("`{name}` isn't available to the Copilot"));
+        }
+        let s = &mut self.server;
+        std::mem::swap(&mut s.project, project);
+        s.path = path.map(Path::to_path_buf);
+        s.history = History::new(&s.project);
+        let result = s.call_tool(name, args, None);
+        std::mem::swap(&mut s.project, project);
+        s.out.clear();
+        match result {
+            Ok(content) => Ok(content
+                .iter()
+                .map(|c| match c["type"].as_str() {
+                    Some("text") => c["text"].as_str().unwrap_or("").to_string(),
+                    Some(t) => format!("[{t} omitted]"),
+                    None => String::new(),
+                })
+                .collect::<Vec<_>>()
+                .join("\n")),
+            Err(ToolError(e)) => Err(e),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -116,6 +116,11 @@ pub fn show(ctx: &Context, app: &mut EditorApp) {
                 ui.menu_button("Music", |ui| crate::ui::music::menu(ui, app));
                 ui.menu_button("AI", |ui| {
                     ui.set_min_width(240.0);
+                    if ui.button(RichText::new("✨ Copilot — type or speak to edit       Ctrl+Space").strong()).clicked() {
+                        crate::ui::copilot::show(app);
+                        ui.close_menu();
+                    }
+                    ui.separator();
                     if ui.button(RichText::new("🪄 Make a video from a prompt (storyboard)…").strong()).clicked() {
                         app.storyboard.open = true;
                         ui.close_menu();
@@ -191,6 +196,14 @@ pub fn show(ctx: &Context, app: &mut EditorApp) {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if widgets::accent_button(ui, "⬆  Export").on_hover_text("Export video (Ctrl+E)").clicked() {
                         app.open_export();
+                    }
+                    ui.add_space(8.0);
+                    if ui.button("✨ Copilot").on_hover_text("Type or speak to edit (Ctrl+Space talks)").clicked() {
+                        if app.copilot.open {
+                            app.copilot.open = false;
+                        } else {
+                            crate::ui::copilot::show(app);
+                        }
                     }
                     ui.add_space(8.0);
                     egui::ComboBox::from_id_salt("aspect")

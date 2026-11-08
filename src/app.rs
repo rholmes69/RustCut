@@ -66,6 +66,7 @@ pub struct EditorApp {
     pub replace: ui::replace::ReplaceUi,
     pub media_preview: ui::media_preview::MediaPreview,
     pub clip_board: ui::clip_board::ClipBoard,
+    pub copilot: ui::copilot::CopilotUi,
     pub rough_cut: ui::rough_cut::RoughCutUi,
     pub toast: Option<Toast>,
     pub ffmpeg_ok: bool,
@@ -115,6 +116,7 @@ impl EditorApp {
             replace: Default::default(),
             media_preview: Default::default(),
             clip_board: Default::default(),
+            copilot: Default::default(),
             rough_cut: Default::default(),
             toast: None,
             ffmpeg_ok: ffmpeg::is_available(),
@@ -605,7 +607,7 @@ impl EditorApp {
         }
         // Auto-commit an undo step once an interaction has finished.
         let interacting = ctx.input(|i| i.pointer.any_down()) || ctx.wants_keyboard_input();
-        if !interacting {
+        if !interacting && !self.copilot.holds_undo() {
             self.history.commit(&self.project);
         }
         // Autosave unsaved work every 30 s so a crash never loses it.
@@ -734,6 +736,7 @@ impl eframe::App for EditorApp {
         ui::voice::poll(self);
         ui::reshoot::poll(self, ctx);
         ui::rough_cut::poll(self);
+        ui::copilot::poll(ctx, self);
         self.handle_shortcuts(ctx);
         self.advance_playback(ctx);
 
@@ -755,6 +758,7 @@ impl eframe::App for EditorApp {
         ui::replace::window(ctx, self);
         ui::clip_board::window(ctx, self);
         ui::media_preview::window(ctx, self);
+        ui::copilot::window(ctx, self);
         ui::rough_cut::window(ctx, self);
 
         self.handle_dropped_files(ctx);
