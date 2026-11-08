@@ -67,6 +67,7 @@ enum CardAction {
     Add(Id),
     Remove(Id),
     Reveal(PathBuf),
+    Preview(Id),
 }
 
 fn media_tab(ui: &mut Ui, app: &mut EditorApp, audio: bool) {
@@ -109,7 +110,7 @@ fn media_tab(ui: &mut Ui, app: &mut EditorApp, audio: bool) {
     for m in &items {
         app.assets.ensure(m);
     }
-    ui.label(widgets::dim("Double-click or drag onto the timeline").small());
+    ui.label(widgets::dim("Double-click or drag onto the timeline · right-click → Preview").small());
     ui.add_space(4.0);
 
     let avail = ui.available_width();
@@ -131,6 +132,7 @@ fn media_tab(ui: &mut Ui, app: &mut EditorApp, audio: bool) {
             app.notify("Removed from project");
         }
         Some(CardAction::Reveal(path)) => reveal_in_folder(&path),
+        Some(CardAction::Preview(id)) => crate::ui::media_preview::open(ui.ctx(), app, id),
         None => {}
     }
 }
@@ -234,6 +236,10 @@ fn media_card(ui: &mut Ui, app: &mut EditorApp, m: &MediaItem, w: f32) -> Option
         app.drag_media = Some(m.id);
     }
     resp.context_menu(|ui| {
+        if ui.add_enabled(!missing, Button::new("👁 Preview")).clicked() {
+            action = Some(CardAction::Preview(m.id));
+            ui.close_menu();
+        }
         if ui.add_enabled(!missing, Button::new("➕ Add to timeline")).clicked() {
             action = Some(CardAction::Add(m.id));
             ui.close_menu();

@@ -139,6 +139,35 @@ impl AudioEngine {
         self.sinks.retain(|s| !s.empty());
     }
 
+    /// Plays a whole file from `from` seconds at full volume (the media library preview).
+    /// The returned sink stops when dropped.
+    pub fn play_file(&mut self, path: &Path, from: f64) -> Option<Sink> {
+        let sink = self.sink()?;
+        let mut child = command(&ffmpeg_bin())
+            .args(["-hide_banner", "-loglevel", "error", "-ss", &format!("{:.3}", from.max(0.0)), "-i"])
+            .arg(path)
+            .args(["-vn", "-f", "f32le", "-ac", "2", "-ar", &RATE.to_string(), "-"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()?;
+        let stdout = child.stdout.take()?;
+        let source = PcmSource {
+            child,
+            reader: BufReader::with_capacity(1 << 16, stdout),
+            local0: 0.0,
+            duration: f64::MAX,
+            fade_in: 0.0,
+            fade_out: 0.0,
+            volume: 1.0,
+            volume_keys: Vec::new(),
+            index: 0,
+            gain: 1.0,
+        };
+        sink.append(source);
+        Some(sink)
+    }
+
     fn sink(&mut self) -> Option<Sink> {
         if self.output.is_none() && !self.unavailable {
             match OutputStream::try_default() {

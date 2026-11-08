@@ -14,6 +14,7 @@ pub mod storyboard;
 pub mod theme;
 pub mod timeline;
 pub mod video_gen;
+pub mod media_preview;
 pub mod replace;
 pub mod reshoot;
 pub mod voice;

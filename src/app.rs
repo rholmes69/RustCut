@@ -64,6 +64,7 @@ pub struct EditorApp {
     pub voice: ui::voice::VoiceUi,
     pub reshoot: ui::reshoot::ReshootUi,
     pub replace: ui::replace::ReplaceUi,
+    pub media_preview: ui::media_preview::MediaPreview,
     pub rough_cut: ui::rough_cut::RoughCutUi,
     pub toast: Option<Toast>,
     pub ffmpeg_ok: bool,
@@ -111,6 +112,7 @@ impl EditorApp {
             voice: Default::default(),
             reshoot: Default::default(),
             replace: Default::default(),
+            media_preview: Default::default(),
             rough_cut: Default::default(),
             toast: None,
             ffmpeg_ok: ffmpeg::is_available(),
@@ -449,6 +451,9 @@ impl EditorApp {
         if ctx.wants_keyboard_input() {
             return;
         }
+        if ui::media_preview::keys(ctx, self) {
+            return;
+        }
         #[derive(PartialEq)]
         enum A {
             Undo,
@@ -746,6 +751,7 @@ impl eframe::App for EditorApp {
         ui::voice::window(ctx, self);
         ui::reshoot::window(ctx, self);
         ui::replace::window(ctx, self);
+        ui::media_preview::window(ctx, self);
         ui::rough_cut::window(ctx, self);
 
         self.handle_dropped_files(ctx);
