@@ -246,6 +246,30 @@ fn app_tool(ctx: &Context, app: &mut EditorApp, name: &str, a: &Value) -> Option
             }
         }
         "set_look" => set_look(app, a),
+        "reverse_clip" | "speed_ramp" => {
+            let Some(c) = a["clip_id"].as_u64().map(|v| v as Id).or(app.selection) else {
+                return Some(Err("say which clip (or select one)".into()));
+            };
+            if name == "reverse_clip" {
+                crate::ui::retime::start_reverse(app, ctx, c).map(|_| format!("reversing clip {c} in the background; it swaps in when done"))
+            } else {
+                match crate::media::retime::Ramp::parse(a["ramp"].as_str().unwrap_or("")) {
+                    Some(r) => {
+                        let smooth = a["smooth"].as_bool().unwrap_or(app.retime.smooth);
+                        crate::ui::retime::start_ramp(app, ctx, c, r, smooth).map(|_| format!("rendering the {} ramp for clip {c} in the background", r.name()))
+                    }
+                    None => Err("unknown ramp; use montage, hero, bullet, flash_in or flash_out".into()),
+                }
+            }
+        }
+        "make_proxies" => {
+            let (have, need) = crate::ui::retime::proxy_counts(app);
+            match crate::ui::retime::start_proxies(app, ctx) {
+                0 if need == 0 => Ok("no videos above 720p, so no proxies are needed".into()),
+                0 => Ok(format!("{have} of {need} proxies already exist or are being made")),
+                n => Ok(format!("making {n} proxies in the background")),
+            }
+        }
         "set_colour_reference" => id("clip_id").and_then(|c| {
             if app.project.clip(c).is_none() {
                 return Err(format!("no clip with id {c}"));
@@ -283,6 +307,7 @@ fn app_tool(ctx: &Context, app: &mut EditorApp, name: &str, a: &Value) -> Option
             let w = a["window"].as_str().unwrap_or("");
             match w {
                 "export" => app.open_export(),
+                "batch_export" => crate::ui::export_queue::show(app),
                 "timeline_storyboard" => app.clip_board.open = true,
                 "storyboard" => app.storyboard.open = true,
                 "rough_cut" => app.rough_cut.open = true,

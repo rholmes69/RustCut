@@ -193,7 +193,7 @@ impl PreviewEngine {
                 let (w, h) = ffmpeg::fit_within(media.width, media.height, PREVIEW_MAX, PREVIEW_MAX);
                 slot.stream = VideoStream::spawn(
                     &self.ctx,
-                    &media.path,
+                    &crate::media::proxy::for_preview(media),
                     source_time,
                     clip.speed,
                     target,

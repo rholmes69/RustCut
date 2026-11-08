@@ -78,6 +78,10 @@ pub fn show(ctx: &Context, app: &mut EditorApp) {
                         app.import_dialog();
                         ui.close_menu();
                     }
+                    if ui.button("📦 Batch export (YouTube, Shorts, square…)…").clicked() {
+                        crate::ui::export_queue::show(app);
+                        ui.close_menu();
+                    }
                     if ui.button("Export video…            Ctrl+E").clicked() {
                         app.open_export();
                         ui.close_menu();
@@ -127,6 +131,22 @@ pub fn show(ctx: &Context, app: &mut EditorApp) {
                         ui.close_menu();
                     }
                     ui.separator();
+                    ui.menu_button("⚡ Preview proxies", |ui| {
+                        ui.set_min_width(260.0);
+                        let (have, need) = crate::ui::retime::proxy_counts(app);
+                        let mut on = crate::media::proxy::enabled();
+                        if ui.checkbox(&mut on, "Use proxies for the preview").on_hover_text("Smaller copies of big videos for smooth scrubbing. Exports always use the originals.").changed() {
+                            crate::media::proxy::set_enabled(on);
+                        }
+                        ui.label(crate::ui::widgets::dim(if need == 0 { "No videos above 720p in this project".to_string() } else { format!("{have} of {need} videos above 720p have a proxy") }).small());
+                        if ui.add_enabled(have < need && !app.retime.making_proxies(), egui::Button::new("Make proxies")).clicked() {
+                            let ctx = ui.ctx().clone();
+                            crate::ui::retime::start_proxies(app, &ctx);
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        ui.checkbox(&mut app.retime.smooth, "Smooth slow motion in speed ramps (optical flow, slower)");
+                    });
                     ui.menu_button("🚩 Markers", |ui| {
                         ui.set_min_width(230.0);
                         if ui.button("Add marker at playhead          M").clicked() {

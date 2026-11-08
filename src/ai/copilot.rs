@@ -83,6 +83,17 @@ pub fn app_tools() -> Vec<Value> {
                     "everything": { "type": "boolean", "description": "apply to every video/image clip in the project" } }),
             &["look"],
         ),
+        f("reverse_clip", "Play a video clip backwards (renders a reversed copy in the background and swaps it in).", json!({ "clip_id": { "type": "integer", "description": "default: the selected clip" } }), &[]),
+        f(
+            "speed_ramp",
+            "Speed-ramp a video clip, keeping its length on the timeline (renders in the background; the ramped clip is silent).",
+            json!({ "clip_id": { "type": "integer", "description": "default: the selected clip" },
+                    "ramp": { "type": "string", "enum": crate::media::retime::Ramp::ALL.iter().map(|r| r.name()).collect::<Vec<_>>(),
+                              "description": "montage = fast-slow-fast, hero = slow-mo moment in the middle, bullet = extreme slow-mo, flash_in = fast→normal, flash_out = normal→fast" },
+                    "smooth": { "type": "boolean", "description": "optical-flow slow motion (smoother, much slower to render)" } }),
+            &["ramp"],
+        ),
+        f("make_proxies", "Make small preview copies of the project's big videos so scrubbing is smooth (exports still use the originals).", json!({}), &[]),
         f("set_colour_reference", "Make a clip the colour reference that other clips are matched to.", json!({ "clip_id": { "type": "integer" } }), &["clip_id"]),
         f(
             "match_colour",
@@ -108,6 +119,7 @@ pub fn app_tools() -> Vec<Value> {
 /// `open_window` targets: name and what it is.
 pub const WINDOWS: &[(&str, &str)] = &[
     ("export", "Export video"),
+    ("batch_export", "Batch export: YouTube 16:9, Shorts 9:16, 4:5, square, draft and 4K versions in one go"),
     ("timeline_storyboard", "Timeline storyboard (every clip as a tile)"),
     ("storyboard", "Make a video from a prompt (AI storyboard)"),
     ("rough_cut", "Rough cut by prompt"),

@@ -94,6 +94,7 @@ pub fn show(ctx: &Context, app: &mut EditorApp) {
     let loudness = app.project.audio.loudness;
     let picture_gaps = app.project.picture_gaps(1.0);
     let mut close = false;
+    let mut batch = false;
     let dlg = &mut app.export;
 
     egui::Window::new(RichText::new("Export video").strong())
@@ -216,6 +217,11 @@ pub fn show(ctx: &Context, app: &mut EditorApp) {
                         if ui.button("Cancel").clicked() {
                             close = true;
                         }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("📦 Batch export…").on_hover_text("YouTube, Shorts, 4:5, square, draft and 4K versions in one go").clicked() {
+                                batch = true;
+                            }
+                        });
                     });
                 }
                 Some((ExportState::Running(p), elapsed)) => {
@@ -296,6 +302,12 @@ pub fn show(ctx: &Context, app: &mut EditorApp) {
             preset: app.export.quality.preset().into(),
         };
         app.export.job = Some(ExportJob::start(app.project.clone(), settings, ctx.clone()));
+    }
+    if batch {
+        app.export_queue.open = true;
+        app.export_queue.base = app.export.path.clone();
+        app.export_queue.fps = app.export.fps;
+        close = true;
     }
     if !open || close {
         // Closing the window keeps a running export going in the background.

@@ -35,6 +35,8 @@ enum ClipMenu {
     RippleDelete,
     ColorRef,
     ColorMatch,
+    Reverse,
+    Ramp(crate::media::retime::Ramp),
 }
 
 fn track_height(kind: TrackKind) -> f32 {
@@ -120,6 +122,15 @@ fn toolbar(ui: &mut Ui, app: &mut EditorApp) {
         let snap_label = RichText::new("🔗  Snap").color(if app.timeline.snap { theme::ACCENT } else { theme::TEXT_DIM });
         if ui.selectable_label(app.timeline.snap, snap_label).on_hover_text("Snap to clips and playhead").clicked() {
             app.timeline.snap = !app.timeline.snap;
+        }
+
+        if let Some((p, stage)) = app.retime.progress() {
+            ui.separator();
+            ui.spinner();
+            ui.label(crate::ui::widgets::dim(format!("{stage} {:.0}%", p * 100.0)).small());
+            if ui.small_button("Cancel").clicked() {
+                crate::ui::retime::cancel(app);
+            }
         }
 
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -424,6 +435,7 @@ fn lanes(ui: &mut Ui, app: &mut EditorApp) {
     let mut menu_action: Option<(Id, ClipMenu)> = None;
     let playhead = app.playhead;
     let color_ref = app.color.reference;
+    let retime_busy = app.retime.busy();
     let mut start_drag: Option<(Id, DragMode, f32)> = None;
     let mut hover_cursor: Option<CursorIcon> = None;
     {
@@ -495,6 +507,24 @@ fn lanes(ui: &mut Ui, app: &mut EditorApp) {
                     {
                         pick(ClipMenu::Freeze);
                         ui.close_menu();
+                    }
+                    if video {
+                        if ui.add_enabled(!retime_busy, Button::new("⏪  Reverse clip")).on_hover_text("Renders a reversed copy and swaps it in (Ctrl+Z to undo)").clicked() {
+                            pick(ClipMenu::Reverse);
+                            ui.close_menu();
+                        }
+                        ui.add_enabled_ui(!retime_busy, |ui| {
+                            ui.menu_button("🎢  Speed ramp", |ui| {
+                                ui.set_min_width(250.0);
+                                ui.label(crate::ui::widgets::dim("Keeps the clip's length (beats stay in sync); the ramped clip is silent.").small());
+                                for r in crate::media::retime::Ramp::ALL {
+                                    if ui.button(r.label()).clicked() {
+                                        pick(ClipMenu::Ramp(r));
+                                        ui.close_menu();
+                                    }
+                                }
+                            });
+                        });
                     }
                     if visual {
                         let is_ref = color_ref == Some(id);
@@ -674,6 +704,17 @@ fn lanes(ui: &mut Ui, app: &mut EditorApp) {
             ClipMenu::Duplicate => app.duplicate_selection(),
             ClipMenu::Delete => app.delete_selection(),
             ClipMenu::RippleDelete => app.ripple_delete_selection(),
+            ClipMenu::Reverse => {
+                if let Err(e) = crate::ui::retime::start_reverse(app, &ctx, id) {
+                    app.notify_error(e);
+                }
+            }
+            ClipMenu::Ramp(r) => {
+                let smooth = app.retime.smooth;
+                if let Err(e) = crate::ui::retime::start_ramp(app, &ctx, id, r, smooth) {
+                    app.notify_error(e);
+                }
+            }
             ClipMenu::ColorRef => app.color.reference = if app.color.reference == Some(id) { None } else { Some(id) },
             ClipMenu::ColorMatch => {
                 if let Err(e) = crate::ui::color::start_match(app, &ctx, vec![id]) {
