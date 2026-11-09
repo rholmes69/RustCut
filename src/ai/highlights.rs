@@ -25,6 +25,12 @@ fn picture_stats(p: &Project, a: f64, b: f64) -> (usize, usize) {
     (cuts, media.len())
 }
 
+/// Seconds from `t` to the next cut (a clip start) on the main track, if any.
+fn next_cut(p: &Project, t: f64) -> Option<f64> {
+    let main = p.tracks.iter().rposition(|tr| tr.kind == TrackKind::Video)?;
+    p.tracks[main].clips.iter().map(|c| c.start - t).filter(|d| *d > -0.05).min_by(|a, b| a.total_cmp(b)).map(|d| d.max(0.0))
+}
+
 /// The best window of about `seconds`, starting on a downbeat when the song has beats.
 pub fn best(project: &Project, seconds: f64) -> Option<Window> {
     let total = project.duration();
@@ -50,8 +56,14 @@ pub fn best(project: &Project, seconds: f64) -> Option<Window> {
         let music = if energy.is_empty() { 0.5 } else { energy.iter().sum::<f32>() / energy.len() as f32 };
         let chorus = sections.iter().any(|x| x.label.eq_ignore_ascii_case("chorus") && (x.start - s).abs() < 0.3);
         let picture = 0.5 * cuts as f32 / max_cuts + 0.5 * media as f32 / max_media;
+        // Open cleanly: starting on a cut is good, a scrap (< 1 s) of the previous shot is not.
+        let opening = match next_cut(project, s) {
+            Some(d) if d < 0.05 => 0.04,
+            Some(d) if d < 1.0 => -0.08,
+            _ => 0.0,
+        };
         // An intro-only window is a weak teaser; later, louder, busier is better.
-        let score = 0.6 * music + 0.3 * picture + if chorus { 0.12 } else { 0.0 };
+        let score = 0.6 * music + 0.3 * picture + opening + if chorus { 0.12 } else { 0.0 };
         if best.as_ref().is_none_or(|b| score > b.score) {
             let why = format!(
                 "{}{} cuts across {} different shots, song energy {:.0}%",

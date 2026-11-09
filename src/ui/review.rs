@@ -133,6 +133,9 @@ pub fn continuity_window(ctx: &Context, app: &mut EditorApp) {
             };
             ui.add_enabled_ui(matches!(app.review.local_model, Some(Some(_))), |ui| ui.radio_value(&mut app.review.local, true, local));
         });
+        if app.review.local {
+            ui.label(RichText::new("Local vision models are slow (~30 min for 85 shots) and raise many false alarms; the cloud model is more reliable.").small().color(Color32::from_rgb(255, 184, 48)));
+        }
         let cost = if app.review.local { "free".to_string() } else { estimate(app).map_or("≈ a few cents".into(), |c| format!("≈ ${:.3}", c.max(0.001))) };
         ui.horizontal(|ui| {
             let busy = app.review.job.is_some();

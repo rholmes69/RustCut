@@ -203,40 +203,73 @@ pub fn run(project: &Project, project_dir: Option<&Path>, engine: &Engine, story
     let Some(sheets) = contact_sheets(&list, work, cancel, progress)? else { return Ok(None) };
     let refs = project_dir.map(find_references).unwrap_or_default();
     progress(0.45, "Asking the vision model…");
-    let mut images = Vec::new();
-    for s in &sheets {
-        images.push(std::fs::read(s)?);
-    }
+    // Cloud models see every sheet at once. A local model's context is small, so it
+    // gets overlapping batches of smaller sheets and the findings are merged.
+    let local = matches!(engine, Engine::Local { .. });
+    let (batch, stride, width, ref_width) = if local { (3, 2, 1024, 512) } else { (sheets.len(), sheets.len(), 0, 768) };
+    let mut ref_images = Vec::new();
     for (_, p) in &refs {
-        images.push(small_jpeg(p, 768)?);
+        ref_images.push(small_jpeg(p, ref_width)?);
     }
-    let text = prompt(list.len(), sheets.len(), &refs, story);
-    let (v, usd) = match engine {
-        Engine::Cloud { key, model } => {
-            let mut parts = vec![json!({ "type": "text", "text": text })];
-            parts.extend(images.iter().map(|j| openrouter::jpeg_part(j)));
-            let (v, usage) = Client::new(key.clone()).chat_json(model, json!([{ "role": "user", "content": parts }]), "continuity", schema())?;
-            (v, usage.cost)
+    let mut issues: Vec<Issue> = Vec::new();
+    let mut summaries = Vec::new();
+    let mut usd = 0.0;
+    let groups: Vec<usize> = (0..sheets.len()).step_by(stride.max(1)).filter(|&g| g == 0 || g + 1 < sheets.len() || stride == sheets.len()).collect();
+    for (gi, &g) in groups.iter().enumerate() {
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(None);
         }
-        Engine::Local { url, model } => {
-            let body = json!({
-                "model": model, "stream": false, "think": false, "format": schema(),
-                "options": { "num_ctx": 24576, "temperature": 0.1 },
-                "messages": [{ "role": "user", "content": text, "images": images.iter().map(|j| crate::util::base64(j)).collect::<Vec<_>>() }],
-            });
-            let agent = ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(1200)).build();
-            let r: Value = match agent.post(&format!("{}/api/chat", url.trim_end_matches('/'))).send_json(body) {
-                Ok(r) => r.into_json()?,
-                Err(ureq::Error::Status(c, r)) => bail!("Ollama: HTTP {c}: {}", r.into_string().unwrap_or_default().chars().take(300).collect::<String>()),
-                Err(e) => bail!("Ollama isn't reachable at {url} ({e})"),
-            };
-            (openrouter::parse_json_reply(r["message"]["content"].as_str().unwrap_or(""))?, 0.0)
+        let part = &sheets[g..(g + batch).min(sheets.len())];
+        let first = g * PER_SHEET + 1;
+        let last = ((g + part.len()) * PER_SHEET).min(list.len());
+        progress(0.45 + 0.55 * gi as f32 / groups.len() as f32, &format!("Asking the vision model ({} of {})…", gi + 1, groups.len()));
+        let mut images = Vec::new();
+        for s in part {
+            images.push(if width > 0 { small_jpeg(s, width)? } else { std::fs::read(s)? });
         }
-    };
+        images.extend(ref_images.iter().cloned());
+        let text = prompt(list.len(), part.len(), &refs, story).replacen(
+            &format!("are contact sheets of its {} shots in order", list.len()),
+            &format!("are contact sheets of shots {first}–{last} (of {}) in order", list.len()),
+            1,
+        );
+        let v = match engine {
+            Engine::Cloud { key, model } => {
+                let mut parts = vec![json!({ "type": "text", "text": text })];
+                parts.extend(images.iter().map(|j| openrouter::jpeg_part(j)));
+                let (v, usage) = Client::new(key.clone()).chat_json(model, json!([{ "role": "user", "content": parts }]), "continuity", schema())?;
+                usd += usage.cost;
+                v
+            }
+            Engine::Local { url, model } => {
+                let body = json!({
+                    "model": model, "stream": false, "think": false, "format": schema(),
+                    "options": { "num_ctx": 12288, "num_predict": 2048, "temperature": 0.1 },
+                    "messages": [{ "role": "user", "content": text, "images": images.iter().map(|j| crate::util::base64(j)).collect::<Vec<_>>() }],
+                });
+                let agent = ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(1200)).build();
+                let r: Value = match agent.post(&format!("{}/api/chat", url.trim_end_matches('/'))).send_json(body) {
+                    Ok(r) => r.into_json()?,
+                    Err(ureq::Error::Status(c, r)) => bail!("Ollama: HTTP {c}: {}", r.into_string().unwrap_or_default().chars().take(300).collect::<String>()),
+                    Err(e) => bail!("Ollama isn't reachable at {url} ({e})"),
+                };
+                openrouter::parse_json_reply(r["message"]["content"].as_str().unwrap_or("")).context("the local model's answer was cut off or not valid JSON")?
+            }
+        };
+        let found: Vec<Issue> = serde_json::from_value(v["issues"].clone()).unwrap_or_default();
+        for f in found {
+            // The same finding from two overlapping batches is kept once.
+            if !issues.iter().any(|i| i.shots == f.shots && i.character.eq_ignore_ascii_case(&f.character)) {
+                issues.push(f);
+            }
+        }
+        if let Some(s) = v["summary"].as_str().filter(|s| !s.trim().is_empty()) {
+            summaries.push(s.trim().to_string());
+        }
+    }
     if cancel.load(Ordering::Relaxed) {
         return Ok(None);
     }
-    let mut issues: Vec<Issue> = serde_json::from_value(v["issues"].clone()).unwrap_or_default();
     // Keep only real shot numbers.
     for i in &mut issues {
         i.shots.retain(|s| (1..=list.len()).contains(s));
@@ -249,7 +282,8 @@ pub fn run(project: &Project, project_dir: Option<&Path>, engine: &Engine, story
         _ => 2,
     };
     issues.sort_by_key(|i| (rank(&i.severity), i.shots[0]));
-    Ok(Some(Report { issues, summary: v["summary"].as_str().unwrap_or("").to_string(), clips: list.iter().map(|s| s.0).collect(), sheets, usd }))
+    let summary = if summaries.len() <= 1 { summaries.concat() } else { summaries.join(" ") };
+    Ok(Some(Report { issues, summary, clips: list.iter().map(|s| s.0).collect(), sheets, usd }))
 }
 
 /// A local Ollama model that can see (prefers the configured one).
