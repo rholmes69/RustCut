@@ -38,12 +38,37 @@ impl Backend {
 
 pub enum Event {
     /// Run a tool and send its result (or an error message) back.
-    Tool { name: String, args: Value, reply: Sender<Result<String, String>> },
+    Tool { name: String, args: Value, reply: Sender<Result<ToolOut, String>> },
     /// Something the model said. `last` = its final answer for this request.
     Say { text: String, last: bool },
     /// Finished: the conversation so far (without the system prompt) and the cost.
     Done { history: Vec<Value>, usd: f64 },
     Failed(String),
+}
+
+/// A tool's answer: text, and optionally a frame for the model to look at (the
+/// worker renders it, so the editor never waits on FFmpeg).
+pub struct ToolOut {
+    pub text: String,
+    pub frame: Option<(crate::model::Project, f64)>,
+}
+
+impl From<String> for ToolOut {
+    fn from(text: String) -> Self {
+        Self { text, frame: None }
+    }
+}
+
+/// True when a local Ollama model accepts images.
+pub fn ollama_has_vision(url: &str, model: &str) -> bool {
+    let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(5)).build();
+    agent
+        .post(&format!("{}/api/show", url.trim_end_matches('/')))
+        .send_json(json!({ "model": model }))
+        .ok()
+        .and_then(|r| r.into_json::<Value>().ok())
+        .and_then(|v| v["capabilities"].as_array().map(|a| a.iter().any(|c| c == "vision")))
+        .unwrap_or(false)
 }
 
 /// App controls the Copilot can use besides the editing tools.
@@ -53,6 +78,12 @@ pub fn app_tools() -> Vec<Value> {
             "parameters": { "type": "object", "properties": props, "required": req } } })
     };
     vec![
+        f(
+            "look_at_frame",
+            "See the finished frame (all tracks, titles and colour, exactly as exported) at a time — to check your own edit or answer questions about what is on screen.",
+            json!({ "time": { "type": "number", "description": "timeline seconds; default: the playhead" } }),
+            &[],
+        ),
         f("play", "Start playback from the playhead.", json!({}), &[]),
         f("pause", "Pause playback.", json!({}), &[]),
         f("seek", "Move the playhead.", json!({ "time": { "type": "number", "description": "seconds on the timeline" } }), &["time"]),
@@ -93,6 +124,14 @@ pub fn app_tools() -> Vec<Value> {
                     "smooth": { "type": "boolean", "description": "optical-flow slow motion (smoother, much slower to render)" } }),
             &["ramp"],
         ),
+        f(
+            "make_teaser",
+            "Make a teaser/trailer from the best part of the video (song energy, chorus, lively cutting) as a separate project saved next to this one. Free; this project doesn't change.",
+            json!({ "seconds": { "type": "number", "description": "15, 30 or 60; default 30" },
+                    "vertical": { "type": "boolean", "description": "9:16 for Shorts/Reels/TikTok" },
+                    "end_card": { "type": "string", "description": "text at the end; default \"Full video out now\"; empty for none" } }),
+            &[],
+        ),
         f("make_proxies", "Make small preview copies of the project's big videos so scrubbing is smooth (exports still use the originals).", json!({}), &[]),
         f("set_colour_reference", "Make a clip the colour reference that other clips are matched to.", json!({ "clip_id": { "type": "integer" } }), &["clip_id"]),
         f(
@@ -131,6 +170,8 @@ pub const WINDOWS: &[(&str, &str)] = &[
     ("beat_montage", "Beat montage"),
     ("costs", "Cost report"),
     ("scopes", "Colour scopes (histogram, waveform, vectorscope)"),
+    ("continuity", "Continuity check: a vision model looks for outfit / hair / face changes between shots (cloud costs a few cents)"),
+    ("teaser", "Teaser / trailer maker"),
     ("ai_settings", "OpenRouter settings"),
 ];
 
@@ -233,7 +274,23 @@ pub fn start(backend: Backend, system: String, mut history: Vec<Value>, user: St
     std::thread::spawn(move || {
         history.push(json!({ "role": "user", "content": user }));
         let mut usd = 0.0;
+        // Only models that can see get the look_at_frame tool.
+        let mut tools = tools;
+        if let Backend::Ollama { url, model } = &backend {
+            if !ollama_has_vision(url, model) {
+                tools.retain(|t| t["function"]["name"] != "look_at_frame");
+            }
+        }
         let r = run(&backend, &system, &mut history, &tools, &tx, &c, &mut usd, &ctx);
+        // Frames aren't re-sent with follow-up requests.
+        for m in history.iter_mut() {
+            if m.get("images").is_some() {
+                m["images"] = json!([]);
+            }
+            if let Some(parts) = m["content"].as_array_mut() {
+                parts.retain(|p| p["type"] != "image_url");
+            }
+        }
         let _ = tx.send(match r {
             Ok(()) => Event::Done { history, usd },
             Err(_) if c.load(Ordering::Relaxed) => Event::Done { history, usd },
@@ -265,6 +322,7 @@ fn run(backend: &Backend, system: &str, history: &mut Vec<Value>, tools: &[Value
         if !text.is_empty() {
             let _ = tx.send(Event::Say { text, last: false });
         }
+        let mut frames: Vec<(f64, Vec<u8>)> = Vec::new();
         for (id, name, args) in calls {
             let (rtx, rrx) = mpsc::channel();
             tx.send(Event::Tool { name: name.clone(), args, reply: rtx }).map_err(|_| anyhow!("the Copilot window closed"))?;
@@ -280,8 +338,15 @@ fn run(backend: &Backend, system: &str, history: &mut Vec<Value>, tools: &[Value
                 }
             };
             let mut content = match result {
-                Ok(s) if s.trim().is_empty() => "done".to_string(),
-                Ok(s) => s,
+                Ok(ToolOut { frame: Some((project, t)), .. }) => match crate::export::render_frame_jpeg(&project, t, 480) {
+                    Ok(jpeg) => {
+                        frames.push((t, jpeg));
+                        format!("Rendered the frame at {t:.2} s; the image follows in the next message.")
+                    }
+                    Err(e) => format!("ERROR: couldn't render the frame: {e:#}"),
+                },
+                Ok(o) if o.text.trim().is_empty() => "done".to_string(),
+                Ok(o) => o.text,
                 Err(e) => format!("ERROR: {e}"),
             };
             if content.len() > max_result {
@@ -295,6 +360,14 @@ fn run(backend: &Backend, system: &str, history: &mut Vec<Value>, tools: &[Value
             history.push(match backend {
                 Backend::OpenRouter { .. } => json!({ "role": "tool", "tool_call_id": id, "content": content }),
                 Backend::Ollama { .. } => json!({ "role": "tool", "tool_name": name, "content": content }),
+            });
+        }
+        // Tool messages can't carry pictures, so frames go in a user message.
+        for (t, jpeg) in frames {
+            let caption = format!("[The finished frame at {t:.2} s, as you asked. Look at it and continue.]");
+            history.push(match backend {
+                Backend::OpenRouter { .. } => json!({ "role": "user", "content": [ { "type": "text", "text": caption }, openrouter::jpeg_part(&jpeg) ] }),
+                Backend::Ollama { .. } => json!({ "role": "user", "content": caption, "images": [crate::util::base64(&jpeg)] }),
             });
         }
     }
@@ -539,16 +612,25 @@ mod tests {
         };
         let tools: Vec<Value> = crate::mcp::copilot_tools(backend.local()).into_iter().chain(app_tools()).collect();
         println!("{} · {} tools, {} KB of schemas", backend.label(), tools.len(), serde_json::to_string(&tools).unwrap().len() / 1024);
-        let mut project = crate::model::Project::default();
+        let mut project = match std::env::var("COPILOT_PROJECT") {
+            Ok(p) => crate::model::Project::load(std::path::Path::new(&p)).unwrap(),
+            Err(_) => crate::model::Project::default(),
+        };
         let mut bridge = crate::mcp::Bridge::default();
         let ctx = egui::Context::default();
         let t0 = std::time::Instant::now();
-        let (rx, _c) = start(backend, system_prompt("project \"Test\", empty timeline, playhead 0 s, no clip selected"), vec![], ask, tools, ctx);
+        let (rx, _c) = start(backend, system_prompt(&format!("project \"{}\", length {:.1} s, playhead 0 s, no clip selected", project.name, project.duration())), vec![], ask, tools, ctx);
         for ev in rx {
             match ev {
                 Event::Tool { name, args, reply } => {
-                    let r = if app_tools().iter().any(|t| t["function"]["name"] == name.as_str()) { Ok("ok".into()) } else { bridge.call(&mut project, None, &name, &args) };
-                    println!("  tool {name} {args} -> {}", match &r { Ok(s) => s.chars().take(160).collect::<String>(), Err(e) => format!("ERR {e}") });
+                    let r = if name == "look_at_frame" {
+                        Ok(ToolOut { text: String::new(), frame: Some((project.clone(), args["time"].as_f64().unwrap_or(0.0))) })
+                    } else if app_tools().iter().any(|t| t["function"]["name"] == name.as_str()) {
+                        Ok(ToolOut::from("ok".to_string()))
+                    } else {
+                        bridge.call(&mut project, None, &name, &args).map(ToolOut::from)
+                    };
+                    println!("  tool {name} {args} -> {}", match &r { Ok(s) => s.text.chars().take(160).collect::<String>(), Err(e) => format!("ERR {e}") });
                     reply.send(r).unwrap();
                 }
                 Event::Say { text, last } => println!("  say{}: {text}", if last { " (final)" } else { "" }),

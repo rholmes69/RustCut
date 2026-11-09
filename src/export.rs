@@ -656,6 +656,11 @@ pub fn render_frame_png(project: &Project, t: f64, short_side: u32) -> Result<Ve
     render_frame_as(project, t, short_side, &["-c:v", "png", "-f", "image2pipe", "-"])
 }
 
+/// The finished frame at `t` as a JPEG (smaller than PNG for sending to models).
+pub fn render_frame_jpeg(project: &Project, t: f64, short_side: u32) -> Result<Vec<u8>> {
+    render_frame_as(project, t, short_side, &["-c:v", "mjpeg", "-q:v", "4", "-f", "image2pipe", "-"])
+}
+
 /// The finished frame at `t` (every track, grade and title, exactly as exported) as
 /// RGBA pixels: `(width, height, data)`.
 pub fn render_frame_rgba(project: &Project, t: f64, short_side: u32) -> Result<(u32, u32, Vec<u8>)> {

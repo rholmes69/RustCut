@@ -111,6 +111,14 @@ pub fn enqueue(app: &mut EditorApp, base: &Path, fps: u32) -> usize {
     picked.len()
 }
 
+/// Queues one ready-made project (e.g. a teaser) at its own shape.
+pub fn enqueue_project(app: &mut EditorApp, project: Project, path: PathBuf, short_side: u32) {
+    let fps = project.fps;
+    let label = project.name.clone();
+    let settings = ExportSettings { path, short_side, fps, crf: 21, preset: "medium".into() };
+    app.export_queue.items.push(Queued { label, project, settings, state: QState::Waiting });
+}
+
 /// Starts the next waiting export when nothing is running.
 pub fn poll(ctx: &Context, app: &mut EditorApp) {
     let q = &mut app.export_queue;

@@ -70,6 +70,7 @@ pub struct EditorApp {
     pub color: ui::color::ColorUi,
     pub retime: ui::retime::RetimeUi,
     pub export_queue: ui::export_queue::ExportQueue,
+    pub review: ui::review::ReviewUi,
     pub rough_cut: ui::rough_cut::RoughCutUi,
     pub toast: Option<Toast>,
     pub ffmpeg_ok: bool,
@@ -123,6 +124,7 @@ impl EditorApp {
             color: Default::default(),
             retime: Default::default(),
             export_queue: Default::default(),
+            review: Default::default(),
             rough_cut: Default::default(),
             toast: None,
             ffmpeg_ok: ffmpeg::is_available(),
@@ -852,6 +854,7 @@ impl eframe::App for EditorApp {
         ui::color::poll(self);
         ui::retime::poll(self);
         ui::export_queue::poll(ctx, self);
+        ui::review::poll(self);
         ui::color::poll_scopes(ctx, self);
         self.handle_shortcuts(ctx);
         self.advance_playback(ctx);
@@ -876,6 +879,8 @@ impl eframe::App for EditorApp {
         ui::media_preview::window(ctx, self);
         ui::copilot::window(ctx, self);
         ui::export_queue::window(ctx, self);
+        ui::review::continuity_window(ctx, self);
+        ui::review::teaser_window(ctx, self);
         ui::color::scopes_window(ctx, self);
         ui::rough_cut::window(ctx, self);
 

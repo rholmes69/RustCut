@@ -184,6 +184,15 @@ pub fn show(ctx: &Context, app: &mut EditorApp) {
                         crate::ui::copilot::show(app);
                         ui.close_menu();
                     }
+                    if ui.button("🔍 Continuity check (outfit, hair, face between shots)…").clicked() {
+                        let ctx = ui.ctx().clone();
+                        crate::ui::review::open_continuity(app, &ctx);
+                        ui.close_menu();
+                    }
+                    if ui.button("🎬 Teaser / trailer from the best part…").clicked() {
+                        app.review.teaser_open = true;
+                        ui.close_menu();
+                    }
                     ui.separator();
                     if ui.button(RichText::new("🪄 Make a video from a prompt (storyboard)…").strong()).clicked() {
                         app.storyboard.open = true;

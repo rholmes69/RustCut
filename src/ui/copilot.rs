@@ -262,6 +262,12 @@ fn app_tool(ctx: &Context, app: &mut EditorApp, name: &str, a: &Value) -> Option
                 }
             }
         }
+        "make_teaser" => {
+            let secs = a["seconds"].as_f64().unwrap_or(30.0).clamp(10.0, 90.0);
+            let card = a["end_card"].as_str().unwrap_or("Full video out now").to_string();
+            crate::ui::review::create_teaser(app, secs, a["vertical"].as_bool().unwrap_or(false), &card)
+                .map(|(p, w)| format!("saved {} ({:.1}–{:.1} s of the video: {})", p.display(), w.start, w.end, w.why))
+        }
         "make_proxies" => {
             let (have, need) = crate::ui::retime::proxy_counts(app);
             match crate::ui::retime::start_proxies(app, ctx) {
@@ -319,6 +325,8 @@ fn app_tool(ctx: &Context, app: &mut EditorApp, name: &str, a: &Value) -> Option
                 "beat_montage" => app.music.montage_open = true,
                 "costs" => app.economics.open = true,
                 "scopes" => app.color.scopes_open = true,
+                "continuity" => crate::ui::review::open_continuity(app, ctx),
+                "teaser" => app.review.teaser_open = true,
                 "ai_settings" => app.ai.open_settings(ctx),
                 _ => return Some(Err(format!("unknown window `{w}`; choose one of {}", WINDOWS.iter().map(|w| w.0).collect::<Vec<_>>().join(", ")))),
             }
@@ -576,11 +584,17 @@ pub fn poll(ctx: &Context, app: &mut EditorApp) {
         match ev {
             Event::Tool { name, args, reply } => {
                 app.copilot.say(Who::Tool, describe(&name, &args));
+                if name == "look_at_frame" {
+                    // The worker renders it; send the project as it is now.
+                    let t = args["time"].as_f64().unwrap_or(app.playhead).clamp(0.0, app.project.duration());
+                    let _ = reply.send(Ok(copilot::ToolOut { text: String::new(), frame: Some((app.project.clone(), t)) }));
+                    continue;
+                }
                 let r = run_tool(ctx, app, &name, &args);
                 if let Err(e) = &r {
                     app.copilot.say(Who::Error, format!("{name}: {e}"));
                 }
-                let _ = reply.send(r);
+                let _ = reply.send(r.map(copilot::ToolOut::from));
             }
             Event::Say { text, last } => {
                 if !text.is_empty() {

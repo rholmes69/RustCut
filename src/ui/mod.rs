@@ -21,6 +21,7 @@ pub mod copilot;
 pub mod media_preview;
 pub mod replace;
 pub mod retime;
+pub mod review;
 pub mod reshoot;
 pub mod voice;
 pub mod topbar;
