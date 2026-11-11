@@ -732,7 +732,17 @@ total spent: ${:.3}", sb.dir.display(), sb.spent);
                 // One extra shot in the storyboard's style and cast, for the media library:
                 // MV_DESC="…" [MV_MOTION="…"] [MV_SECONDS=5] [MV_DRY=1], then MV_STILL=<approved still> to animate.
                 let latest = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.is_dir() && p.join("storyboard.json").is_file()).max_by_key(|p| p.metadata().and_then(|m| m.modified()).ok()).expect("a planned storyboard");
-                let base = crate::ai::storyboard::Storyboard::load(&latest.join("storyboard.json")).unwrap();
+                let mut base = crate::ai::storyboard::Storyboard::load(&latest.join("storyboard.json")).unwrap();
+                // MV_CAST="Aishyla=…;Pastor Holmes=…" replaces the cast for this shot only.
+                if let Ok(cast) = std::env::var("MV_CAST") {
+                    base.cast = cast
+                        .split(';')
+                        .filter_map(|e| {
+                            let (n, p) = e.split_once('=')?;
+                            Some(crate::ai::storyboard::CastMember { name: n.trim().into(), photo: p.trim().into() })
+                        })
+                        .collect();
+                }
                 let p = Project::load(&project_path).unwrap();
                 let desc = std::env::var("MV_DESC").expect("MV_DESC");
                 let motion = std::env::var("MV_MOTION").unwrap_or_default();

@@ -65,8 +65,16 @@ pub fn plan(project: &Project, video_clip: Id, voice_clip: Option<Id>) -> Result
         None => find_voice(project, video_clip).ok_or_else(|| anyhow!("put the dialogue (a voice clip) on an audio track over this shot first"))?,
     };
     let voice = project.clip(voice_id).ok_or_else(|| anyhow!("no voice clip {voice_id}"))?;
-    let start = (voice.start - PAD).max(v.start);
-    let end = (voice.end() + PAD).min(v.end());
+    let mut start = (voice.start - PAD).max(v.start);
+    let mut end = (voice.end() + PAD).min(v.end());
+    // A sliver shorter than a clip can't be split off: take the shot to its edge instead.
+    let margin = crate::model::MIN_CLIP_LEN + 0.02;
+    if start - v.start < margin {
+        start = v.start;
+    }
+    if v.end() - end < margin {
+        end = v.end();
+    }
     if end - start < 0.5 {
         bail!("the dialogue doesn't overlap this shot");
     }
@@ -345,6 +353,27 @@ mod tests {
         assert_eq!(mid.transform.scale, 1.2);
         assert_eq!(mid.volume, 0.0);
         assert!((clips[2].start - 5.15).abs() < 1e-9 && (clips[2].source_in - 5.15).abs() < 1e-9, "the rest continues from the right frame");
+    }
+
+    #[test]
+    fn a_line_near_the_shot_edge_takes_the_whole_edge() {
+        let mut p = Project::default();
+        let v = p.add_media(MediaItem { id: 0, path: "shot.mp4".into(), name: "shot.mp4".into(), kind: MediaKind::Video, duration: 4.0, width: 1280, height: 720, fps: 24.0, has_audio: false });
+        let a = p.add_media(MediaItem { id: 0, path: "line.mp3".into(), name: "line.mp3".into(), kind: MediaKind::Audio, duration: 1.07, width: 0, height: 0, fps: 0.0, has_audio: true });
+        let mut vc = p.new_media_clip(v, 0.0).unwrap();
+        vc.duration = 1.37; // 0–1.37 s
+        let vid = vc.id;
+        p.append_to_main(vc);
+        let mut ac = p.new_media_clip(a, 0.11).unwrap();
+        ac.start = 0.11; // 0.11–1.18: padded, 0.04 s from both edges
+        ac.audio_role = AudioRole::Voice;
+        p.place_clip(ac, None);
+        let plan = plan(&p, vid, None).unwrap();
+        assert!(plan.start.abs() < 1e-9 && (plan.end - 1.37).abs() < 1e-9, "{plan:?}");
+        let info = ProbeInfo { kind: MediaKind::Video, duration: 1.37, width: 1280, height: 720, fps: 25.0, has_audio: true };
+        apply(&mut p, &plan, Path::new("lipsync-shot.mp4"), info).unwrap();
+        let main = p.main_track();
+        assert_eq!(p.tracks[main].clips.len(), 1, "the whole shot is replaced, no slivers");
     }
 
     #[test]
