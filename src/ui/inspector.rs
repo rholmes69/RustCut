@@ -187,6 +187,9 @@ fn clip_panel(ui: &mut Ui, app: &mut EditorApp, clip: Clip) {
                 ui.label("Size");
                 ui.add(Slider::new(&mut style.font_size, 12.0..=300.0).fixed_decimals(0));
                 ui.end_row();
+                ui.label("Font");
+                font_picker(ui, style);
+                ui.end_row();
                 ui.label("Bold");
                 ui.checkbox(&mut style.bold, "");
                 ui.end_row();
@@ -612,6 +615,7 @@ fn project_panel(ui: &mut Ui, app: &mut EditorApp) {
     Grid::new("shortcuts").num_columns(2).spacing([16.0, 4.0]).show(ui, |ui| {
         for (k, v) in [
             ("Space", "Play / pause"),
+            ("Ctrl+G", "Go to a time (or click the timecode)"),
             ("Ctrl+B", "Split"),
             ("Del", "Delete clip"),
             ("Ctrl+D", "Duplicate"),
@@ -628,4 +632,20 @@ fn project_panel(ui: &mut Ui, app: &mut EditorApp) {
         }
     });
     ui.add_space(vec2(0.0, 8.0).y);
+}
+
+/// Font dropdown; each entry is drawn in its own font.
+fn font_picker(ui: &mut egui::Ui, style: &mut crate::model::TextStyle) {
+    use crate::render::text;
+    let label = |id: &str| RichText::new(text::font_name(id)).family(theme::text_family(id, false)).size(15.0);
+    egui::ComboBox::from_id_salt("text-font").selected_text(label(&style.font)).width(170.0).height(420.0).show_ui(ui, |ui| {
+        ui.selectable_value(&mut style.font, String::new(), label(""));
+        for cursive in [true, false] {
+            ui.separator();
+            ui.label(widgets::dim(if cursive { "Script & handwriting" } else { "Display" }).small());
+            for f in text::FONTS.iter().filter(|f| f.cursive == cursive) {
+                ui.selectable_value(&mut style.font, f.id.to_string(), label(f.id));
+            }
+        }
+    });
 }

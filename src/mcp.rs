@@ -436,17 +436,22 @@ impl<W: Write> Server<W> {
     }
 
     fn add_text(&mut self, a: &Value) -> Result<Vec<Value>> {
-        let mut style = match opt_str(a, "preset")? {
-            Some(name) => text::presets()
-                .into_iter()
-                .find(|(n, _)| n.eq_ignore_ascii_case(name))
-                .map(|(_, s)| s)
-                .ok_or_else(|| {
-                    let names: Vec<_> = text::presets().into_iter().map(|(n, _)| n).collect();
-                    anyhow!("unknown preset `{name}`; use one of {names:?}")
-                })?,
-            None => TextStyle::default(),
+        let (mut style, preset_y, mut anim) = match opt_str(a, "preset")? {
+            Some(name) => {
+                let h = text::find_preset(name).ok_or_else(|| anyhow!("unknown preset `{name}`; use one of {:?}", text::preset_names()))?;
+                (h.style, h.y, h.anim)
+            }
+            None => (TextStyle::default(), None, None),
         };
+        match opt_str(a, "animation")? {
+            Some("none") => anim = None,
+            Some(name) => {
+                anim = Some(crate::model::TextAnim::parse(name).ok_or_else(|| {
+                    anyhow!("unknown animation `{name}`; use one of {:?}", crate::model::TextAnim::ALL.map(|a| a.name()))
+                })?)
+            }
+            None => {}
+        }
         style.content = req_str(a, "content")?.to_string();
         apply_text_args(&mut style, a)?;
         let mut clip = self.project.new_text_clip(style, opt_f64(a, "start")?.unwrap_or(0.0));
@@ -455,6 +460,9 @@ impl<W: Write> Server<W> {
         }
         if let Some(x) = opt_f64(a, "x")? {
             clip.transform.x = x as f32;
+        }
+        if let Some(y) = preset_y {
+            clip.transform.y = y;
         }
         if let Some(y) = opt_f64(a, "y")? {
             clip.transform.y = y as f32;
@@ -467,8 +475,15 @@ impl<W: Write> Server<W> {
         }
         let id = clip.id;
         let track = opt_track(a, &self.project)?;
-        self.project.place_clip(clip, track);
-        Ok(text_json(&json!({ "clip": self.clip_json_by_id(id) })))
+        let Some(anim) = anim else {
+            self.project.place_clip(clip, track);
+            return Ok(text_json(&json!({ "clip": self.clip_json_by_id(id) })));
+        };
+        let ids = self.project.place_animated_text(clip, anim, track);
+        if ids.len() == 1 {
+            return Ok(text_json(&json!({ "clip": self.clip_json_by_id(ids[0]), "animation": anim.name() })));
+        }
+        Ok(text_json(&json!({ "animation": anim.name(), "clip_ids": ids, "note": "The reveal is a run of text clips on one track, one per step." })))
     }
 
     fn update_clip(&mut self, a: &Value) -> Result<Vec<Value>> {
@@ -523,7 +538,7 @@ impl<W: Write> Server<W> {
         if let Some(v) = f32_field("saturation")? {
             c.adjust.saturation = v.clamp(0.0, 3.0);
         }
-        let text_keys = ["content", "font_size", "color", "background", "outline", "bold"];
+        let text_keys = ["content", "font_size", "font", "color", "background", "outline", "bold"];
         if text_keys.iter().any(|k| a.get(*k).is_some()) {
             let style = c.text_mut().ok_or_else(|| anyhow!("{text_keys:?} only apply to text clips"))?;
             if let Some(s) = opt_str(a, "content")? {
@@ -1488,7 +1503,18 @@ impl<W: Write> Server<W> {
             let language = opt_str(a, "language")?.unwrap_or("auto").to_string();
             lyrics::timed_lines(&self.project, song, &input, &language, &cancel, &mut |p, s| notify(p, s))?.ok_or_else(|| anyhow!("cancelled"))?
         };
+        let font = match opt_str(a, "font")? {
+            Some(f) => crate::render::text::parse_font(f).ok_or_else(|| anyhow!("unknown font `{f}` (see the font enum)"))?,
+            None => "",
+        };
         let n = lyrics::apply_lyrics(&mut self.project, &lines, style, y, opt_bool(a, "beat_snap")?.unwrap_or(true));
+        for t in self.project.tracks.iter_mut().filter(|t| t.kind == TrackKind::Text && (t.name == "Lyrics" || t.name == "Lyrics highlight")) {
+            for c in &mut t.clips {
+                if let Some(s) = c.text_mut() {
+                    s.font = font.to_string();
+                }
+            }
+        }
         let sections = text.as_deref().map_or(0, |t| lyrics::apply_header_sections(&mut self.project, song, t, &lines));
         Ok(text_json(&json!({
             "lines": lines.len(),
@@ -2329,6 +2355,9 @@ fn apply_text_args(style: &mut TextStyle, a: &Value) -> Result<()> {
     if let Some(v) = opt_f64(a, "font_size")? {
         style.font_size = v.clamp(4.0, 600.0) as f32;
     }
+    if let Some(v) = opt_str(a, "font")? {
+        style.font = crate::render::text::parse_font(v).ok_or_else(|| anyhow!("unknown font `{v}` (see the font enum)"))?.to_string();
+    }
     if let Some(v) = opt_bool(a, "bold")? {
         style.bold = v;
     }
@@ -2369,9 +2398,15 @@ fn tool_definitions() -> Vec<Value> {
     let aspect = json!({ "type": "string", "enum": ["16:9", "9:16", "1:1", "4:3", "4:5"], "description": "Canvas ratio" });
     let filter = json!({ "type": "string", "enum": ["none", "bw", "vintage", "warm", "cool", "vivid", "matte"], "description": "Colour filter preset" });
     let track = int("Target track index from get_project (optional)");
+    let font = json!({
+        "type": "string",
+        "enum": std::iter::once("default").chain(crate::render::text::FONTS.iter().map(|f| f.id)).collect::<Vec<_>>(),
+        "description": "Font: default (sans), script/handwriting (great-vibes, pacifico, dancing-script, lobster, satisfy, sacramento, caveat) or display (bebas-neue, anton, montserrat, poppins, oswald, playfair-display, permanent-marker, bangers)",
+    });
     let text_props = |mut base: Value| {
         let m = base.as_object_mut().expect("object");
         m.insert("font_size".into(), num("Font size in px relative to a 1080 px short side (default 72)"));
+        m.insert("font".into(), font.clone());
         m.insert("bold".into(), boolean("Bold font"));
         m.insert("color".into(), color("Text colour, #RRGGBB or #RRGGBBAA"));
         m.insert("background".into(), color("Background box colour (#RRGGBBAA), or null for none"));
@@ -2399,11 +2434,12 @@ fn tool_definitions() -> Vec<Value> {
             "source_in": num("Offset into the source file in seconds (trim the beginning)"),
             "track_index": track.clone(),
         }), &["media_id"], edit.clone()),
-        tool("add_text", "Add text", "Adds a text overlay. Presets: Default, Title, Subtitle, Caption, Neon, Lower third.", text_props(json!({
+        tool("add_text", "Add text", "Adds a text overlay. Presets: Default, Title, Subtitle, Caption, Neon, Lower third. Social media presets (each also sets a safe screen position): YouTube title, Subscribe, Chapter title, TikTok caption, TikTok label, Comment reply, Viral caption, Hook, Word pop, Reels caption, Story script, Story strong, Handle, Meme, Handwritten note. Animated social presets (look, position and motion): Drop-in title, Pulsing subscribe, Slide-up chapter, Word-by-word caption, One-word caption, Bouncy label, Pop caption, Slam hook, Shaking word, Neon flicker, Typewriter note, Typewriter handle.", text_props(json!({
             "content": string("The text; may contain newlines"),
             "start": num("Timeline position in seconds (default 0)"),
             "duration": num("Length in seconds (default 3)"),
-            "preset": string("Style preset name"),
+            "preset": string("Style preset name (e.g. \"TikTok caption\", \"Subscribe\", \"Word-by-word caption\")"),
+            "animation": { "type": "string", "enum": ["none", "pop", "bounce_up", "slide_up", "drop_in", "slam", "shake", "pulse", "flicker", "word_by_word", "one_word", "typewriter"], "description": "Text animation (overrides the preset's). word_by_word, one_word and typewriter split the text into a run of clips." },
             "x": num("Horizontal centre offset as a fraction of canvas width (0 = centred)"),
             "y": num("Vertical centre offset as a fraction of canvas height (0 = centred, 0.35 = lower third)"),
             "fade_in": num("Fade-in seconds"),
@@ -2609,6 +2645,7 @@ fn tool_definitions() -> Vec<Value> {
             "style": { "type": "string", "enum": ["karaoke", "lines", "big_centered", "pop_words", "build_up"], "description": "karaoke = white line, words light up as sung (default lines)" },
             "beat_snap": boolean("pop_words: land each word on the nearest beat when beats are detected (default true)"),
             "position": { "type": "string", "enum": ["top", "middle", "bottom"] },
+            "font": font.clone(),
             "language": string("Vocals language code, e.g. en (default auto)"),
             "song_clip_id": int("The song clip (default: the beat clip or first audio-track clip)"),
         }), &[], edit.clone()),

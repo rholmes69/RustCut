@@ -526,6 +526,7 @@ pub fn caption_styles() -> Vec<(&'static str, TextStyle)> {
             TextStyle {
                 content: String::new(),
                 font_size: 60.0,
+                font: String::new(),
                 bold: true,
                 color: [255, 255, 255, 255],
                 background: None,
@@ -538,6 +539,7 @@ pub fn caption_styles() -> Vec<(&'static str, TextStyle)> {
             TextStyle {
                 content: String::new(),
                 font_size: 48.0,
+                font: String::new(),
                 bold: false,
                 color: [255, 255, 255, 255],
                 background: Some([0, 0, 0, 180]),
@@ -550,6 +552,7 @@ pub fn caption_styles() -> Vec<(&'static str, TextStyle)> {
             TextStyle {
                 content: String::new(),
                 font_size: 84.0,
+                font: String::new(),
                 bold: true,
                 color: [255, 224, 40, 255],
                 background: None,
@@ -562,6 +565,7 @@ pub fn caption_styles() -> Vec<(&'static str, TextStyle)> {
             TextStyle {
                 content: String::new(),
                 font_size: 44.0,
+                font: String::new(),
                 bold: false,
                 color: [255, 255, 255, 240],
                 background: None,

@@ -681,6 +681,194 @@ impl MotionPreset {
     }
 }
 
+/// Animations for text: keyframed moves on one clip, or reveals that become a run of
+/// text clips on one track (word by word, one word at a time, typewriter).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextAnim {
+    Pop,
+    BounceUp,
+    SlideUp,
+    DropIn,
+    Slam,
+    Shake,
+    Pulse,
+    Flicker,
+    WordByWord,
+    OneWord,
+    Typewriter,
+}
+
+impl TextAnim {
+    pub const ALL: [TextAnim; 11] = [
+        TextAnim::Pop,
+        TextAnim::BounceUp,
+        TextAnim::SlideUp,
+        TextAnim::DropIn,
+        TextAnim::Slam,
+        TextAnim::Shake,
+        TextAnim::Pulse,
+        TextAnim::Flicker,
+        TextAnim::WordByWord,
+        TextAnim::OneWord,
+        TextAnim::Typewriter,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            TextAnim::Pop => "pop",
+            TextAnim::BounceUp => "bounce_up",
+            TextAnim::SlideUp => "slide_up",
+            TextAnim::DropIn => "drop_in",
+            TextAnim::Slam => "slam",
+            TextAnim::Shake => "shake",
+            TextAnim::Pulse => "pulse",
+            TextAnim::Flicker => "flicker",
+            TextAnim::WordByWord => "word_by_word",
+            TextAnim::OneWord => "one_word",
+            TextAnim::Typewriter => "typewriter",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<TextAnim> {
+        let k = s.trim().to_ascii_lowercase().replace([' ', '-'], "_");
+        TextAnim::ALL.into_iter().find(|a| a.name() == k)
+    }
+
+    /// Reveals split the text over several clips; the rest animate one clip.
+    pub fn is_reveal(self) -> bool {
+        matches!(self, TextAnim::WordByWord | TextAnim::OneWord | TextAnim::Typewriter)
+    }
+
+    /// Keyframes for the moves (reveals use `pop_keys` per word for One word).
+    fn apply_keys(self, c: &mut Clip) {
+        let d = c.duration.max(MIN_CLIP_LEN);
+        let (y0, s0, o0, x0) = (c.value_at(Prop::Y, c.start), c.value_at(Prop::Scale, c.start), c.value_at(Prop::Opacity, c.start), c.value_at(Prop::X, c.start));
+        let k = |time: f64, value: f32, ease: Ease| Keyframe { time: time.min(d), value, ease };
+        let fade = |c: &mut Clip, len: f64| {
+            c.keyframes.insert(Prop::Opacity, vec![k(0.0, 0.0, Ease::Linear), k(len, o0, Ease::Linear)]);
+        };
+        match self {
+            TextAnim::Pop => {
+                c.keyframes.insert(Prop::Scale, vec![k(0.0, s0 * 0.4, Ease::EaseOut), k(0.16, s0 * 1.12, Ease::Smooth), k(0.28, s0, Ease::Linear)]);
+                fade(c, 0.1);
+            }
+            TextAnim::BounceUp => {
+                c.keyframes.insert(Prop::Y, vec![k(0.0, y0 + 0.12, Ease::EaseOut), k(0.25, y0 - 0.015, Ease::Smooth), k(0.4, y0, Ease::Linear)]);
+                fade(c, 0.15);
+            }
+            TextAnim::SlideUp => {
+                c.keyframes.insert(Prop::Y, vec![k(0.0, y0 + 0.06, Ease::EaseOut), k(0.45, y0, Ease::Linear)]);
+                fade(c, 0.35);
+            }
+            TextAnim::DropIn => {
+                c.keyframes.insert(Prop::Y, vec![k(0.0, y0 - 0.5, Ease::EaseIn), k(0.3, y0 + 0.02, Ease::Smooth), k(0.42, y0 - 0.008, Ease::Smooth), k(0.52, y0, Ease::Linear)]);
+            }
+            TextAnim::Slam => {
+                c.keyframes.insert(Prop::Scale, vec![k(0.0, s0 * 2.4, Ease::EaseIn), k(0.14, s0 * 0.94, Ease::Smooth), k(0.24, s0, Ease::Linear)]);
+                fade(c, 0.08);
+                // A small jolt as it lands.
+                c.keyframes.insert(Prop::X, vec![k(0.14, x0, Ease::Linear), k(0.18, x0 + 0.012, Ease::Linear), k(0.22, x0 - 0.008, Ease::Linear), k(0.26, x0, Ease::Linear)]);
+            }
+            TextAnim::Shake => {
+                let mut keys = Vec::new();
+                for i in 0..=10 {
+                    let off = if i == 10 { 0.0 } else if i % 2 == 0 { 0.014 } else { -0.014 } * (1.0 - i as f32 / 12.0);
+                    keys.push(k(i as f64 * 0.045, x0 + off, Ease::Linear));
+                }
+                c.keyframes.insert(Prop::X, keys);
+            }
+            TextAnim::Pulse => {
+                let mut keys = vec![k(0.0, s0, Ease::Smooth)];
+                let mut t = 0.0;
+                while t + 0.7 <= d {
+                    keys.push(k(t + 0.35, s0 * 1.09, Ease::Smooth));
+                    keys.push(k(t + 0.7, s0, Ease::Smooth));
+                    t += 0.7;
+                }
+                c.keyframes.insert(Prop::Scale, keys);
+            }
+            TextAnim::Flicker => {
+                // Neon sign warming up: a few quick blinks, then steady with one late flick.
+                let pattern = [(0.0, 0.0), (0.06, 1.0), (0.1, 0.15), (0.16, 1.0), (0.3, 1.0), (0.33, 0.2), (0.4, 1.0)];
+                let mut keys: Vec<Keyframe> = pattern.iter().map(|&(t, v)| k(t, o0 * v, Ease::Linear)).collect();
+                let late = d * 0.6;
+                if late > 0.6 {
+                    keys.extend([k(late, o0, Ease::Linear), k(late + 0.03, o0 * 0.3, Ease::Linear), k(late + 0.07, o0, Ease::Linear)]);
+                }
+                c.keyframes.insert(Prop::Opacity, keys);
+            }
+            TextAnim::WordByWord | TextAnim::OneWord | TextAnim::Typewriter => {}
+        }
+        for keys in c.keyframes.values_mut() {
+            keys.dedup_by(|b, a| (b.time - a.time).abs() <= KEY_TOLERANCE);
+        }
+    }
+}
+
+impl Project {
+    /// Places a text clip with an animation. Moves are keyframed on the clip; reveals
+    /// become consecutive clips on one track (karaoke-style `align_to` keeps a growing
+    /// line from shifting). Returns the ids placed, first to last.
+    pub fn place_animated_text(&mut self, clip: Clip, anim: TextAnim, track: Option<usize>) -> Vec<Id> {
+        let Some(style) = clip.text().cloned() else { return Vec::new() };
+        if !anim.is_reveal() {
+            let mut clip = clip;
+            anim.apply_keys(&mut clip);
+            let id = clip.id;
+            self.place_clip(clip, track);
+            return vec![id];
+        }
+        let line = style.content.split_whitespace().collect::<Vec<_>>().join(" ");
+        let words: Vec<&str> = line.split(' ').filter(|w| !w.is_empty()).collect();
+        // Each step's text: the growing line, a single word, or the line typed out.
+        let steps: Vec<(String, bool)> = match anim {
+            TextAnim::WordByWord => (1..=words.len()).map(|n| (words[..n].join(" "), true)).collect(),
+            TextAnim::OneWord => words.iter().map(|w| (w.to_string(), false)).collect(),
+            _ => {
+                let chars: Vec<char> = line.chars().collect();
+                let per = chars.len().div_ceil(40).max(1);
+                (1..=chars.len().div_ceil(per)).map(|n| (chars[..(n * per).min(chars.len())].iter().collect(), true)).collect()
+            }
+        };
+        if steps.len() <= 1 {
+            return self.place_animated_text(clip, TextAnim::Pop, track);
+        }
+        let total = clip.duration.max(MIN_CLIP_LEN * steps.len() as f64);
+        let per_step = match anim {
+            TextAnim::Typewriter => 0.05,
+            TextAnim::OneWord => (total / steps.len() as f64).clamp(0.2, 0.6),
+            _ => 0.28,
+        }
+        .min(total * 0.7 / steps.len() as f64)
+        .max(MIN_CLIP_LEN);
+        let mut ids = Vec::new();
+        let mut ti = track;
+        for (i, (text, grow)) in steps.iter().enumerate() {
+            let last = i + 1 == steps.len();
+            let mut c = clip.clone();
+            if i > 0 {
+                c.id = self.new_id();
+                c.fade_in = 0.0;
+            }
+            if !last {
+                c.fade_out = 0.0;
+            }
+            c.start = clip.start + per_step * i as f64;
+            c.duration = if last && anim != TextAnim::OneWord { total - per_step * i as f64 } else { per_step };
+            if last && anim == TextAnim::OneWord {
+                c.duration = (total - per_step * i as f64).max(per_step);
+            }
+            c.source = ClipSource::Text(TextStyle { content: text.clone(), align_to: grow.then(|| line.clone()), ..style.clone() });
+            if anim == TextAnim::OneWord {
+                TextAnim::Pop.apply_keys(&mut c);
+            }
+            ids.push(c.id);
+            ti = Some(self.place_clip(c, ti));
+        }
+        ids
+    }
+}
+
 /// Keyframes closer than this (seconds) are treated as the same keyframe.
 pub const KEY_TOLERANCE: f64 = 1.0 / 60.0;
 
@@ -705,6 +893,9 @@ pub struct TextStyle {
     pub content: String,
     /// Pixels relative to a 1080 px short side.
     pub font_size: f32,
+    /// A bundled font id (`render::text::FONTS`); empty = the system sans.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub font: String,
     pub bold: bool,
     pub color: [u8; 4],
     pub background: Option<[u8; 4]>,
@@ -720,6 +911,7 @@ impl Default for TextStyle {
         Self {
             content: "Add text".into(),
             font_size: 72.0,
+            font: String::new(),
             bold: true,
             color: [255, 255, 255, 255],
             background: None,
@@ -2028,6 +2220,46 @@ mod tests {
         assert!(p.clip(right).unwrap().transition_in.is_none());
         assert_eq!(TransitionKind::parse("Cross-dissolve"), Some(TransitionKind::Dissolve));
         assert_eq!(TransitionKind::parse("wipe_up"), Some(TransitionKind::WipeUp));
+    }
+
+    #[test]
+    fn text_animations() {
+        let style = |s: &str| TextStyle { content: s.into(), ..Default::default() };
+        // Moves keyframe one clip and end where the text was placed.
+        for anim in TextAnim::ALL.into_iter().filter(|a| !a.is_reveal()) {
+            let mut p = Project::default();
+            let mut c = p.new_text_clip(style("Hello there"), 5.0);
+            c.transform.y = 0.2;
+            let ids = p.place_animated_text(c, anim, None);
+            assert_eq!(ids.len(), 1, "{anim:?}");
+            let c = p.clip(ids[0]).unwrap();
+            assert!(!c.keyframes.is_empty(), "{anim:?} added no keyframes");
+            let end = c.end() - 0.01;
+            for (prop, want) in [(Prop::Y, 0.2), (Prop::Scale, 1.0), (Prop::Opacity, 1.0)] {
+                assert!((c.value_at(prop, end) - want).abs() < 0.02, "{anim:?} {prop:?} ends at {}", c.value_at(prop, end));
+            }
+            assert_eq!(TextAnim::parse(anim.name()), Some(anim));
+        }
+        // Word by word: a growing line, back to back on one track, as long as the original.
+        let mut p = Project::default();
+        let c = p.new_text_clip(style("wait for\nthe end"), 2.0);
+        let ids = p.place_animated_text(c, TextAnim::WordByWord, None);
+        let clips: Vec<&Clip> = ids.iter().map(|&i| p.clip(i).unwrap()).collect();
+        let texts: Vec<&str> = clips.iter().map(|c| c.text().unwrap().content.as_str()).collect();
+        assert_eq!(texts, ["wait", "wait for", "wait for the", "wait for the end"]);
+        assert!(clips.iter().all(|c| c.text().unwrap().align_to.as_deref() == Some("wait for the end")));
+        assert!(clips.windows(2).all(|w| (w[0].end() - w[1].start).abs() < 1e-9));
+        assert!((clips[0].start - 2.0).abs() < 1e-9 && (clips.last().unwrap().end() - (2.0 + DEFAULT_TEXT_LEN)).abs() < 1e-9);
+        assert_eq!(p.tracks.iter().filter(|t| !t.clips.is_empty()).count(), 1);
+        // One word: single words, each popping in. Typewriter: capped at 40 steps.
+        let c = p.new_text_clip(style("ONE TWO"), 10.0);
+        let ids = p.place_animated_text(c, TextAnim::OneWord, None);
+        assert_eq!(ids.iter().map(|&i| p.clip(i).unwrap().text().unwrap().content.clone()).collect::<Vec<_>>(), ["ONE", "TWO"]);
+        assert!(p.clip(ids[1]).unwrap().keyframes.contains_key(&Prop::Scale));
+        let long = "x".repeat(100);
+        let c = p.new_text_clip(style(&long), 20.0);
+        let ids = p.place_animated_text(c, TextAnim::Typewriter, None);
+        assert!(ids.len() <= 40 && p.clip(*ids.last().unwrap()).unwrap().text().unwrap().content == long);
     }
 
     #[test]

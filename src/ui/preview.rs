@@ -58,7 +58,7 @@ fn transport(ui: &mut Ui, app: &mut EditorApp) {
     let duration = app.project.duration();
     let rect = ui.max_rect();
     ui.horizontal_centered(|ui| {
-        ui.label(RichText::new(widgets::format_time(app.playhead)).monospace().color(theme::ACCENT));
+        goto_timecode(ui, app);
         ui.label(RichText::new(format!("/ {}", widgets::format_time(duration))).monospace().color(theme::TEXT_DIM));
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let (w, h) = app.project.aspect.size_for(1080);
@@ -293,7 +293,7 @@ fn canvas(ui: &mut Ui, app: &mut EditorApp) {
                 TrackKind::Text => {
                     let Some(style) = clip.text() else { continue };
                     let px = text::font_px(style.font_size, tf.scale, short) as f32;
-                    let font = FontId::new(px.max(1.0), theme::text_family(style.bold));
+                    let font = FontId::new(px.max(1.0), theme::text_family(&style.font, style.bold));
                     let galley = cp.layout_no_wrap(style.content.clone(), font.clone(), Color32::WHITE);
                     let size = galley.size();
                     let mut pos = center - size / 2.0;
@@ -424,4 +424,56 @@ fn canvas(ui: &mut Ui, app: &mut EditorApp) {
         }
     }
     let _ = resp;
+}
+
+/// The playhead's timecode. Click it (or press Ctrl+G) to type a time and jump there:
+/// Enter goes, Esc or clicking away cancels, a time it can't read stays open in red.
+fn goto_timecode(ui: &mut Ui, app: &mut EditorApp) {
+    let Some(mut text) = app.goto.take() else {
+        let label = egui::Label::new(RichText::new(widgets::format_time(app.playhead)).monospace().color(theme::ACCENT)).sense(egui::Sense::click());
+        if ui.add(label).on_hover_text("Click to go to a time (Ctrl+G)").on_hover_cursor(egui::CursorIcon::Text).clicked() {
+            app.open_goto();
+        }
+        return;
+    };
+    let id = ui.make_persistent_id("goto-time");
+    let bad = ui.data(|d| d.get_temp::<String>(id.with("error")));
+    let mut edit = egui::TextEdit::singleline(&mut text).id(id).desired_width(96.0).font(egui::TextStyle::Monospace).hint_text("2:38.5");
+    if bad.is_some() {
+        edit = edit.text_color(theme::DANGER);
+    }
+    let mut out = edit.show(ui);
+    let resp = out.response.clone();
+    if !resp.has_focus() && !resp.lost_focus() {
+        // Just opened: focus it with the whole time selected, so typing replaces it.
+        resp.request_focus();
+        let all = egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(text.chars().count()));
+        out.state.cursor.set_char_range(Some(all));
+        out.state.store(ui.ctx(), id);
+    }
+    if let Some(e) = &bad {
+        resp.clone().on_hover_text(e.as_str());
+    } else {
+        resp.clone().on_hover_text("Type a time: 2:38.5, 158.5, 1:02:03 or 2m38s. Enter to go, Esc to cancel");
+    }
+    let (enter, escape) = ui.input(|i| (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
+    let clear = |ui: &Ui| ui.data_mut(|d| d.remove::<String>(id.with("error")));
+    if resp.lost_focus() && enter {
+        match app.go_to_time(&text) {
+            Ok(_) => clear(ui),
+            Err(e) => {
+                ui.data_mut(|d| d.insert_temp(id.with("error"), e.clone()));
+                app.notify_error(e);
+                app.goto = Some(text); // keep it open to fix
+                ui.memory_mut(|m| m.request_focus(id));
+            }
+        }
+    } else if escape || resp.lost_focus() {
+        clear(ui); // cancelled: the playhead stays where it was
+    } else {
+        if resp.changed() {
+            clear(ui);
+        }
+        app.goto = Some(text);
+    }
 }

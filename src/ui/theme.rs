@@ -19,22 +19,27 @@ pub const CLIP_IMAGE: Color32 = Color32::from_rgb(78, 62, 132);
 pub const CLIP_TEXT: Color32 = Color32::from_rgb(168, 104, 34);
 pub const CLIP_AUDIO: Color32 = Color32::from_rgb(30, 104, 70);
 
-/// Font families used for on-canvas text (same TTF files the exporter uses).
-pub const FONT_TEXT: &str = "rc-text";
-pub const FONT_TEXT_BOLD: &str = "rc-text-bold";
+/// egui family for on-canvas text in `font` (a bundled id or "" for the default) — the
+/// same TTF files the exporter uses. Unknown ids fall back to the default.
+pub fn text_family(font: &str, bold: bool) -> FontFamily {
+    let id = crate::render::text::find_font(font).map_or("", |f| f.id);
+    FontFamily::Name(family_name(id, bold).into())
+}
 
-pub fn text_family(bold: bool) -> FontFamily {
-    FontFamily::Name(if bold { FONT_TEXT_BOLD } else { FONT_TEXT }.into())
+fn family_name(id: &str, bold: bool) -> String {
+    format!("rc-text-{id}{}", if bold { "-bold" } else { "" })
 }
 
 pub fn apply(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
     let fallback = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
-    for (family, bold) in [(FONT_TEXT, false), (FONT_TEXT_BOLD, true)] {
+    let ids = std::iter::once("").chain(crate::render::text::FONTS.iter().map(|f| f.id));
+    for (id, bold) in ids.flat_map(|id| [(id, false), (id, true)]) {
+        let family = family_name(id, bold);
         let mut list = Vec::new();
-        if let Some(bytes) = crate::render::text::font_path(bold).and_then(|p| std::fs::read(p).ok()) {
-            fonts.font_data.insert(family.to_owned(), FontData::from_owned(bytes));
-            list.push(family.to_owned());
+        if let Some(bytes) = crate::render::text::font_bytes(id, bold) {
+            fonts.font_data.insert(family.clone(), FontData::from_owned(bytes));
+            list.push(family.clone());
         }
         list.extend(fallback.iter().cloned());
         fonts.families.insert(FontFamily::Name(family.into()), list);

@@ -237,32 +237,7 @@ pub fn quick_command(text: &str) -> Option<Vec<(String, Value)>> {
 
 /// "1:20", "1:02:03", "95", "95 seconds", "2 minutes", "1 minute 30 seconds".
 fn parse_time(s: &str) -> Option<f64> {
-    let s = s.trim();
-    if s.contains(':') {
-        let mut t = 0.0;
-        for part in s.split_whitespace().next()?.split(':') {
-            t = t * 60.0 + part.parse::<f64>().ok()?;
-        }
-        return Some(t);
-    }
-    let words: Vec<&str> = s.split_whitespace().collect();
-    let (mut t, mut i, mut any) = (0.0, 0, false);
-    while i < words.len() {
-        let n: f64 = words[i].parse().ok()?;
-        let unit = words.get(i + 1).copied().unwrap_or("seconds");
-        t += n * match unit {
-            u if u.starts_with("min") => 60.0,
-            u if u.starts_with("sec") || u == "s" => 1.0,
-            u if u.starts_with("hour") => 3600.0,
-            _ => return None,
-        };
-        any = true;
-        i += 2;
-        if words.get(i) == Some(&"and") {
-            i += 1;
-        }
-    }
-    any.then_some(t)
+    crate::ui::widgets::parse_time(s)
 }
 
 /// Starts one request on a worker thread. `history` is the conversation so far

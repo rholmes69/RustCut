@@ -5,6 +5,74 @@ use crate::ui::theme;
 use egui::{pos2, Color32, Painter, Rect, Response, RichText, Stroke, Ui};
 
 /// `mm:ss.cc` (or `h:mm:ss.cc`).
+/// Reads a time typed by a person: "158.9", "2:38.9", "1:02:03", "02:38.90" (as shown
+/// on the timecode), "2m38s", "2m 38.5s", "1h2m", "95 seconds", "1 minute 30 seconds".
+pub fn parse_time(s: &str) -> Option<f64> {
+    let s = s.trim().trim_end_matches('.').to_ascii_lowercase();
+    if s.is_empty() {
+        return None;
+    }
+    let ok = |t: f64| (t.is_finite() && t >= 0.0).then_some(t);
+    if s.contains(':') {
+        let mut t = 0.0;
+        let parts: Vec<&str> = s.split_whitespace().next()?.split(':').collect();
+        if parts.len() > 3 {
+            return None;
+        }
+        for (i, part) in parts.iter().enumerate() {
+            let v: f64 = part.parse().ok()?;
+            // Only the last field may have a fraction; earlier ones are whole minutes/hours.
+            if (i + 1 < parts.len() && v.fract() != 0.0) || (i > 0 && v >= 60.0) {
+                return None;
+            }
+            t = t * 60.0 + v;
+        }
+        return ok(t);
+    }
+    if let Ok(v) = s.parse::<f64>() {
+        return ok(v);
+    }
+    // Numbers with units, written together ("2m38s") or apart ("2 minutes 38 seconds").
+    let (mut t, mut num, mut any) = (0.0, String::new(), false);
+    let mut chars = s.chars().peekable();
+    while let Some(&c) = chars.peek() {
+        if c.is_ascii_digit() || c == '.' {
+            num.push(c);
+            chars.next();
+        } else if c.is_alphabetic() {
+            let mut unit = String::new();
+            while let Some(&u) = chars.peek().filter(|u| u.is_alphabetic()) {
+                unit.push(u);
+                chars.next();
+            }
+            if unit == "and" {
+                continue;
+            }
+            let n: f64 = std::mem::take(&mut num).parse().ok()?;
+            t += n * match unit.as_str() {
+                "h" | "hr" | "hrs" | "hour" | "hours" => 3600.0,
+                "m" | "min" | "mins" | "minute" | "minutes" => 60.0,
+                "s" | "sec" | "secs" | "second" | "seconds" => 1.0,
+                _ => return None,
+            };
+            any = true;
+        } else if c.is_whitespace() || c == ',' {
+            chars.next();
+        } else {
+            return None;
+        }
+    }
+    if !num.is_empty() {
+        t += num.parse::<f64>().ok()?; // a trailing bare number counts as seconds: "2m 30"
+        any = true;
+    }
+    if any {
+        ok(t)
+    } else {
+        None
+    }
+}
+
 pub fn format_time(t: f64) -> String {
     let total_cs = (t.max(0.0) * 100.0).round() as u64;
     let cs = total_cs % 100;
@@ -72,5 +140,33 @@ pub fn draw_waveform(painter: &Painter, area: Rect, peaks: &[f32], color: Color3
             }
         }
         x += 2.0;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_typed_times() {
+        let t = |s: &str| parse_time(s);
+        assert_eq!(t("158.9"), Some(158.9));
+        assert_eq!(t("2:38.9"), Some(158.9));
+        assert_eq!(t("02:38.90"), Some(158.9));
+        assert_eq!(t("1:02:03"), Some(3723.0));
+        assert_eq!(t("2m38s"), Some(158.0));
+        assert_eq!(t("2m 38.5s"), Some(158.5));
+        assert_eq!(t("2m 30"), Some(150.0));
+        assert_eq!(t("1h2m"), Some(3720.0));
+        assert_eq!(t("95 seconds"), Some(95.0));
+        assert_eq!(t("1 minute and 30 seconds"), Some(90.0));
+        assert_eq!(t("1:20 please"), Some(80.0));
+        // Each time shown on the timecode reads back as itself.
+        for v in [0.0, 5.25, 158.9, 3723.5] {
+            assert!((t(&format_time(v)).unwrap() - v).abs() < 0.006, "{v}");
+        }
+        for bad in ["", "abc", "1:75", "1.5:20", "-3", "2 parsecs", "1:2:3:4"] {
+            assert_eq!(t(bad), None, "{bad}");
+        }
     }
 }

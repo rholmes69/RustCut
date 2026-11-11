@@ -42,7 +42,8 @@ decoding and rendering, offline, no account, no watermark.
   5 easing curves, prev/next keyframe navigation, diamonds on the timeline, and one-click motion presets
   (Ken Burns, punch-in, slide in, pop in, spin in). Exports frame-accurately via per-frame FFmpeg expressions
 - Filters (B&W, Vintage, Warm, Cool, Vivid, Matte) + brightness/contrast/saturation
-- Text with presets, colour, background box and outline
+- Text with presets, colour, background box and outline, in 16 fonts: the default sans plus 15 bundled ones — script & handwriting (Great Vibes, Pacifico, Dancing Script, Lobster, Satisfy, Sacramento, Caveat) and display (Bebas Neue, Anton, Montserrat, Poppins, Oswald, Playfair Display, Permanent Marker, Bangers). They ship in `assets/fonts` (SIL Open Font License / Apache 2.0, licenses alongside; `tools/fetch-fonts.sh` re-downloads them), so preview and export look the same on every machine. MCP: `font` on add_text, update_clip and add_lyrics
+- Social media text styles for YouTube, TikTok, Shorts & Reels and Instagram (titles, Subscribe, captions, labels, comment replies, hooks, handles, memes), each placed clear of the app's buttons; plus 12 animated ones — drop-in, pulse, slide-up, bounce, pop, slam, shake, neon flicker, word-by-word, one word at a time and typewriter (Text panel → Social media / Animated; hover to preview). MCP: `preset` and `animation` on add_text
 - **Auto-captions**: local speech-to-text (whisper.cpp) → timed, editable caption clips; 4 styles,
   words-per-caption control, 19 languages + translate-to-English, `.srt` export
 - **Transitions** at any cut between touching clips: cross-dissolve, dip to black/white, slide ×4,

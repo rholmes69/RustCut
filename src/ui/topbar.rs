@@ -89,6 +89,10 @@ pub fn show(ctx: &Context, app: &mut EditorApp) {
                 });
                 ui.menu_button("Edit", |ui| {
                     ui.set_min_width(220.0);
+                    if ui.button("⏱ Go to time…            Ctrl+G").on_hover_text("Type a time like 2:38.5 to move the playhead there").clicked() {
+                        app.open_goto();
+                        ui.close_menu();
+                    }
                     if ui.button("🎞 Timeline storyboard…").clicked() {
                         app.clip_board.open = true;
                         ui.close_menu();

@@ -322,7 +322,7 @@ pub fn build_graph(
                         alpha += &format!("*clip(({}-t)/{},0,1)", num(clip.end()), num(fo));
                     }
                     let mut o = Vec::new();
-                    if let Some(font) = text::font_path(style.bold) {
+                    if let Some(font) = text::font_path(&style.font, style.bold) {
                         o.push(format!("fontfile='{}'", ffmpeg::filter_path(&font)));
                     }
                     o.push(format!("textfile='{}'", ffmpeg::filter_path(&text_file)));
@@ -335,7 +335,7 @@ pub fn build_graph(
                     }
                     o.push(format!("fontcolor={}", hex(style.color)));
                     // Karaoke parts start where their full line would start if centred.
-                    let anchor = style.align_to.as_ref().filter(|f| !f.is_empty()).and_then(|f| text::line_width_px(f, style.bold, base_px));
+                    let anchor = style.align_to.as_ref().filter(|f| !f.is_empty()).and_then(|f| text::line_width_px(f, &style.font, style.bold, base_px));
                     match anchor {
                         Some(full_w) => o.push(format!("x='(w-{full_w:.2}*({}))/2+({})*{w}'", prop_expr(clip, Prop::Scale, &local), prop_expr(clip, Prop::X, &local))),
                         None => o.push(format!("x='(w-text_w)/2+({})*{w}'", prop_expr(clip, Prop::X, &local))),

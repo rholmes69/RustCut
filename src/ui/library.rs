@@ -5,7 +5,7 @@ use crate::model::{FilterPreset, Id, MediaItem, MediaKind, TrackKind};
 use crate::render::text;
 use crate::ui::{theme, widgets};
 use egui::{
-    pos2, vec2, Align2, Button, Color32, Context, FontId, Frame, Margin, Rect, RichText, ScrollArea, Sense, Stroke, Ui,
+    pos2, vec2, Align2, Button, Color32, Context, FontId, Frame, Margin, Rect, RichText, ScrollArea, Sense, Stroke, Ui, Vec2,
 };
 use std::path::PathBuf;
 
@@ -261,33 +261,95 @@ fn text_tab(ui: &mut Ui, app: &mut EditorApp) {
     widgets::section_title(ui, "Text styles");
     ui.label(widgets::dim("Click a style to add it at the playhead.").small());
     ui.add_space(6.0);
-    let w = ui.available_width();
     for (name, style) in text::presets() {
-        let (rect, resp) = ui.allocate_exact_size(vec2(w, 58.0), Sense::click());
-        let painter = ui.painter_at(rect);
-        let fill = if resp.hovered() { theme::SURFACE_HOVER } else { theme::SURFACE };
-        painter.rect_filled(rect, 8.0, fill);
-        let size = (style.font_size * 0.3).clamp(15.0, 28.0);
-        let font = FontId::new(size, theme::text_family(style.bold));
-        let g = painter.layout_no_wrap(name.to_string(), font, widgets::with_alpha(style.color, 1.0));
-        let pos = rect.center() - g.size() / 2.0;
-        if let Some(bg) = style.background {
-            painter.rect_filled(Rect::from_min_size(pos, g.size()).expand(5.0), 3.0, widgets::with_alpha(bg, 1.0));
-        }
-        if let Some(ol) = style.outline {
-            for (dx, dy) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)] {
-                painter.galley_with_override_text_color(pos + vec2(dx, dy) * 1.5, g.clone(), widgets::with_alpha(ol, 1.0));
-            }
-        }
-        painter.galley(pos, g, Color32::WHITE);
-        if resp.hovered() {
-            painter.text(rect.right_center() - vec2(12.0, 0.0), Align2::RIGHT_CENTER, "+", FontId::proportional(18.0), theme::ACCENT);
-        }
-        if resp.clicked() {
+        if style_card(ui, name, &style, None).clicked() {
             app.add_text(style);
         }
-        ui.add_space(4.0);
     }
+    ui.add_space(10.0);
+    widgets::section_title(ui, "Social media");
+    ui.label(widgets::dim("Placed clear of each app's buttons and captions.").small());
+    let social = text::social_presets();
+    for platform in text::PLATFORMS {
+        ui.add_space(6.0);
+        ui.label(widgets::dim(*platform).small());
+        for p in social.iter().filter(|p| p.platform == *platform) {
+            if style_card(ui, p.name, &p.style, None).clicked() {
+                app.add_text_at(p.style.clone(), Some(p.y));
+            }
+        }
+    }
+    ui.add_space(10.0);
+    widgets::section_title(ui, "Animated");
+    ui.label(widgets::dim("Hover to preview. Click to add at the playhead.").small());
+    let animated = text::animated_presets();
+    for platform in text::PLATFORMS {
+        let group: Vec<_> = animated.iter().filter(|p| p.platform == *platform).collect();
+        if group.is_empty() {
+            continue;
+        }
+        ui.add_space(6.0);
+        ui.label(widgets::dim(*platform).small());
+        for p in group {
+            if style_card(ui, p.name, &p.style, Some(p.anim)).on_hover_text(p.about).clicked() {
+                app.add_animated_text(p.style.clone(), p.y, p.anim);
+            }
+        }
+    }
+}
+
+/// How an animated style looks `t` seconds in: the visible text and its offset,
+/// scale and opacity. Uses the real animation on a scratch project.
+fn anim_frame(name: &str, style: &crate::model::TextStyle, anim: crate::model::TextAnim, t: f64) -> Option<(String, Vec2, f32, f32)> {
+    use crate::model::{Project, Prop, TextStyle};
+    let mut p = Project::default();
+    let clip = p.new_text_clip(TextStyle { content: name.to_string(), ..style.clone() }, 0.0);
+    p.place_animated_text(clip, anim, None);
+    let clips = p.tracks.iter().flat_map(|tr| tr.clips.iter());
+    let c = clips.filter(|c| c.start <= t).max_by(|a, b| a.start.total_cmp(&b.start))?;
+    let text = c.text()?.content.clone();
+    let off = vec2(c.value_at(Prop::X, t), c.value_at(Prop::Y, t));
+    Some((text, off, c.value_at(Prop::Scale, t), c.value_at(Prop::Opacity, t).clamp(0.0, 1.0)))
+}
+
+/// A clickable card showing a preset's name drawn in its own style.
+/// With an animation the card plays it while hovered, and shows a ▶ badge.
+fn style_card(ui: &mut Ui, name: &str, style: &crate::model::TextStyle, anim: Option<crate::model::TextAnim>) -> egui::Response {
+    let w = ui.available_width();
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, 58.0), Sense::click());
+    let painter = ui.painter_at(rect);
+    let fill = if resp.hovered() { theme::SURFACE_HOVER } else { theme::SURFACE };
+    painter.rect_filled(rect, 8.0, fill);
+    let (mut label, mut off, mut scale, mut alpha) = (name.to_string(), Vec2::ZERO, 1.0, 1.0);
+    if let Some(anim) = anim {
+        painter.text(rect.left_top() + vec2(8.0, 6.0), Align2::LEFT_TOP, "▶", FontId::proportional(10.0), theme::ACCENT);
+        if resp.hovered() {
+            let t = ui.input(|i| i.time) % 2.4;
+            if let Some((text, o, s, a)) = anim_frame(name, style, anim, t) {
+                // Canvas fractions mapped onto the card (a 9:16-ish strip).
+                (label, off, scale, alpha) = (text, vec2(o.x * rect.width(), o.y * rect.height() * 2.5), s, a);
+            }
+            ui.ctx().request_repaint();
+        }
+    }
+    let size = (style.font_size * 0.3).clamp(15.0, 28.0) * scale.clamp(0.2, 3.0);
+    let font = FontId::new(size, theme::text_family(&style.font, style.bold));
+    let g = painter.layout_no_wrap(label, font, widgets::with_alpha(style.color, alpha));
+    let pos = rect.center() + off - g.size() / 2.0;
+    if let Some(bg) = style.background {
+        painter.rect_filled(Rect::from_min_size(pos, g.size()).expand(5.0), 3.0, widgets::with_alpha(bg, alpha));
+    }
+    if let Some(ol) = style.outline {
+        for (dx, dy) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)] {
+            painter.galley_with_override_text_color(pos + vec2(dx, dy) * 1.5, g.clone(), widgets::with_alpha(ol, alpha));
+        }
+    }
+    painter.galley(pos, g, Color32::WHITE);
+    if resp.hovered() {
+        painter.text(rect.right_center() - vec2(12.0, 0.0), Align2::RIGHT_CENTER, "+", FontId::proportional(18.0), theme::ACCENT);
+    }
+    ui.add_space(4.0);
+    resp
 }
 
 /// The selected clip if it is a video or image on a video track.

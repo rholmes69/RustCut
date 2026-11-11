@@ -71,6 +71,8 @@ pub struct EditorApp {
     pub retime: ui::retime::RetimeUi,
     pub export_queue: ui::export_queue::ExportQueue,
     pub review: ui::review::ReviewUi,
+    /// "Go to time": the text being typed in the transport bar's timecode (Ctrl+G).
+    pub goto: Option<String>,
     pub rough_cut: ui::rough_cut::RoughCutUi,
     pub toast: Option<Toast>,
     pub ffmpeg_ok: bool,
@@ -125,6 +127,7 @@ impl EditorApp {
             retime: Default::default(),
             export_queue: Default::default(),
             review: Default::default(),
+            goto: None,
             rough_cut: Default::default(),
             toast: None,
             ffmpeg_ok: ffmpeg::is_available(),
@@ -185,6 +188,24 @@ impl EditorApp {
     pub fn pause(&mut self) {
         self.playing = false;
         self.audio.stop();
+    }
+
+    /// Opens "Go to time" in the transport bar, starting from the playhead's time.
+    pub fn open_goto(&mut self) {
+        self.goto = Some(ui::widgets::format_time(self.playhead));
+    }
+
+    /// Moves the playhead to a typed time and scrolls the timeline to it. `Err` names
+    /// what couldn't be read.
+    pub fn go_to_time(&mut self, text: &str) -> Result<f64, String> {
+        let t = ui::widgets::parse_time(text).ok_or_else(|| format!("Couldn't read “{}” — try 2:38.5, 158.5 or 2m38s", text.trim()))?;
+        let end = self.project.duration();
+        if t > end + 1e-6 {
+            return Err(format!("{} is past the end of the video ({})", ui::widgets::format_time(t), ui::widgets::format_time(end)));
+        }
+        self.seek(t);
+        self.timeline.reveal = Some(t);
+        Ok(t)
     }
 
     pub fn seek(&mut self, t: f64) {
@@ -286,7 +307,23 @@ impl EditorApp {
     }
 
     pub fn add_text(&mut self, style: TextStyle) {
-        let clip = self.project.new_text_clip(style, self.playhead);
+        self.add_text_at(style, None);
+    }
+
+    /// Adds animated text at the playhead (reveals become a run of clips).
+    pub fn add_animated_text(&mut self, style: TextStyle, y: f32, anim: crate::model::TextAnim) {
+        let mut clip = self.project.new_text_clip(style, self.playhead);
+        clip.transform.y = y;
+        let ids = self.project.place_animated_text(clip, anim, None);
+        self.selection = ids.first().copied();
+    }
+
+    /// Adds text at the playhead, optionally at a vertical position (canvas fraction).
+    pub fn add_text_at(&mut self, style: TextStyle, y: Option<f32>) {
+        let mut clip = self.project.new_text_clip(style, self.playhead);
+        if let Some(y) = y {
+            clip.transform.y = y;
+        }
         let id = clip.id;
         self.project.place_clip(clip, None);
         self.selection = Some(id);
@@ -573,6 +610,7 @@ impl EditorApp {
             RippleDelete,
             Marker,
             MarkerJump(i32),
+            GoTo,
         }
         let mut actions = Vec::new();
         let dt = self.frame_dt();
@@ -614,6 +652,9 @@ impl EditorApp {
             }
             if i.consume_key(Modifiers::NONE, Key::Space) {
                 actions.push(A::Play);
+            }
+            if i.consume_key(Modifiers::COMMAND, Key::G) {
+                actions.push(A::GoTo);
             }
             if i.consume_key(Modifiers::NONE, Key::M) {
                 actions.push(A::Marker);
@@ -658,6 +699,7 @@ impl EditorApp {
                 A::RippleDelete => self.ripple_delete_selection(),
                 A::Marker => self.add_marker_at_playhead(),
                 A::MarkerJump(d) => self.jump_marker(d),
+                A::GoTo => self.open_goto(),
                 A::Play => self.toggle_play(),
                 A::Step(d) => self.seek(self.playhead + d),
                 A::Home => {
