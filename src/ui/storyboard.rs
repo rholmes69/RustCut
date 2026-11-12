@@ -61,6 +61,11 @@ pub struct StoryboardUi {
     audio: bool,
     thumbs: HashMap<PathBuf, TextureHandle>,
     thumb_jobs: HashMap<PathBuf, Task<(u32, u32, Vec<u8>)>>,
+    /// Large decodes of the selected shot's frame, for the detail view.
+    big: HashMap<PathBuf, TextureHandle>,
+    big_jobs: HashMap<PathBuf, Task<(u32, u32, Vec<u8>)>>,
+    /// Shot shown in the detail pane.
+    selected: usize,
     /// Music-video mode: plan shots for the song on the timeline.
     pub music_video: bool,
     /// Whole song (false) or its best 30 seconds (true).
@@ -85,6 +90,9 @@ impl Default for StoryboardUi {
             audio: false,
             thumbs: HashMap::new(),
             thumb_jobs: HashMap::new(),
+            big: HashMap::new(),
+            big_jobs: HashMap::new(),
+            selected: 0,
             music_video: false,
             best30: false,
             max_shots: 10,
@@ -298,34 +306,48 @@ impl MapPlain for TaskState<Storyboard> {
     }
 }
 
-pub(crate) fn thumb(app: &mut EditorApp, ui: &Ui, path: &Path) -> Option<egui::TextureId> {
-    let g = &mut app.storyboard;
-    if let Some(t) = g.thumbs.get(path) {
+type TexCache = HashMap<PathBuf, TextureHandle>;
+type TexJobs = HashMap<PathBuf, Task<(u32, u32, Vec<u8>)>>;
+
+/// Decodes `path` in the background to fit within `max` px and caches it as a texture.
+fn cached_texture(cache: &mut TexCache, jobs: &mut TexJobs, ui: &Ui, path: &Path, max: u32) -> Option<egui::TextureId> {
+    if let Some(t) = cache.get(path) {
         return Some(t.id());
     }
-    if let Some(state) = g.thumb_jobs.get(path).and_then(Task::take_finished) {
-        g.thumb_jobs.remove(path);
+    if let Some(state) = jobs.get(path).and_then(Task::take_finished) {
+        jobs.remove(path);
         if let TaskState::Done((w, h, rgba)) = state {
             let img = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
-            let tex = ui.ctx().load_texture(format!("sb-{}", path.display()), img, egui::TextureOptions::LINEAR);
+            let tex = ui.ctx().load_texture(format!("sb{max}-{}", path.display()), img, egui::TextureOptions::LINEAR);
             let id = tex.id();
-            g.thumbs.insert(path.to_path_buf(), tex);
+            cache.insert(path.to_path_buf(), tex);
             return Some(id);
         }
         return None;
     }
-    if !g.thumb_jobs.contains_key(path) {
+    if !jobs.contains_key(path) {
         let p = path.to_path_buf();
-        g.thumb_jobs.insert(
+        jobs.insert(
             path.to_path_buf(),
             Task::spawn(ui.ctx().clone(), move |_, _| {
                 let info = ffmpeg::probe(&p)?;
-                let (w, h) = ffmpeg::fit_within(info.width, info.height, 360, 360);
+                let (w, h) = ffmpeg::fit_within(info.width, info.height, max, max);
                 Ok(Some((w, h, ffmpeg::extract_frame(&p, 0.0, w, h)?)))
             }),
         );
     }
     None
+}
+
+pub(crate) fn thumb(app: &mut EditorApp, ui: &Ui, path: &Path) -> Option<egui::TextureId> {
+    let g = &mut app.storyboard;
+    cached_texture(&mut g.thumbs, &mut g.thumb_jobs, ui, path, 360)
+}
+
+/// A large decode (up to 1280 px) for the detail view.
+fn big_frame(app: &mut EditorApp, ui: &Ui, path: &Path) -> Option<egui::TextureId> {
+    let g = &mut app.storyboard;
+    cached_texture(&mut g.big, &mut g.big_jobs, ui, path, 1280)
 }
 
 #[derive(Clone, Copy)]
@@ -436,86 +458,189 @@ fn brief_stage(ui: &mut Ui, app: &mut EditorApp) {
     });
 }
 
-fn shot_card(ui: &mut Ui, app: &mut EditorApp, i: usize, n: usize, card_w: f32, busy: bool) -> (Option<CardAction>, bool) {
-    let has_character = app.storyboard.sb.as_ref().is_some_and(|s| s.character.is_some());
-    let sb_uses = app.storyboard.sb.as_ref().map_or(0, |s| s.uses(i));
+/// Width of the filmstrip column on the left of the board.
+const STRIP_W: f32 = 280.0;
+
+/// One row of the filmstrip: thumbnail, shot number, length, approval state and a two-line
+/// summary. Returns true when it was clicked.
+fn strip_row(ui: &mut Ui, app: &mut EditorApp, i: usize, selected: bool) -> bool {
+    let Some(sb) = app.storyboard.sb.as_ref() else { return false };
+    let shot = &sb.shots[i];
+    let (frame, approved, seconds, desc) = (shot.frame.clone(), shot.approved, shot.seconds, shot.description.clone());
+    let uses = sb.uses(i);
+    let (rw, rh) = sb.aspect.ratio();
+    let ratio = rw as f32 / rh as f32;
+
+    let row_h = 82.0_f32;
+    let thumb_h = 62.0_f32;
+    let thumb_w = (thumb_h * ratio).min(112.0);
+    let thumb_h = thumb_w / ratio;
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h), egui::Sense::click());
+    let bg = if selected {
+        theme::ACCENT.gamma_multiply(0.22)
+    } else if resp.hovered() {
+        theme::SURFACE
+    } else {
+        theme::PANEL_ALT
+    };
+    let img = egui::Rect::from_min_size(rect.min + egui::vec2(10.0, (row_h - thumb_h) / 2.0), egui::vec2(thumb_w, thumb_h));
+    let tex = frame.as_ref().and_then(|f| thumb(app, ui, f));
+
+    let p = ui.painter().with_clip_rect(rect);
+    p.rect_filled(rect, 6.0, bg);
+    if selected {
+        p.rect_stroke(rect, 6.0, egui::Stroke::new(1.5_f32, theme::ACCENT));
+    }
+    if approved {
+        p.rect_filled(egui::Rect::from_min_size(rect.min, egui::vec2(4.0, row_h)), 2.0, theme::ACCENT);
+    }
+    match tex {
+        Some(t) => {
+            p.image(t, img, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
+        }
+        None => {
+            p.rect_filled(img, 3.0, theme::SURFACE);
+            p.text(img.center(), egui::Align2::CENTER_CENTER, if frame.is_some() { "…" } else { "no frame" }, egui::FontId::proportional(11.0), theme::TEXT_DIM);
+        }
+    }
+    let tx = img.right() + 10.0;
+    p.text(egui::pos2(tx, rect.top() + 14.0), egui::Align2::LEFT_CENTER, format!("Shot {}", i + 1), egui::FontId::proportional(14.0), theme::TEXT);
+    let status = if approved { "✔ Approved" } else { "Needs review" };
+    let status_color = if approved { theme::ACCENT } else { theme::TEXT_DIM };
+    p.text(egui::pos2(rect.right() - 8.0, rect.top() + 14.0), egui::Align2::RIGHT_CENTER, status, egui::FontId::proportional(11.5), status_color);
+    let meta = if uses > 1 { format!("{seconds:.1} s · used for {uses} cuts") } else { format!("{seconds:.1} s") };
+    p.text(egui::pos2(tx, rect.top() + 32.0), egui::Align2::LEFT_CENTER, meta, egui::FontId::proportional(11.5), theme::TEXT_DIM);
+    let mut job = egui::text::LayoutJob::simple(desc, egui::FontId::proportional(11.0), theme::TEXT_DIM, (rect.right() - tx - 8.0).max(40.0));
+    job.wrap.max_rows = 2;
+    let galley = ui.fonts(|f| f.layout_job(job));
+    p.galley(egui::pos2(tx, rect.top() + 43.0), galley, theme::TEXT_DIM);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
+}
+
+/// The selected shot: a large frame, previous/next, and every field readable at full width.
+fn shot_detail(ui: &mut Ui, app: &mut EditorApp, i: usize, n: usize, busy: bool) -> (Option<CardAction>, bool) {
     let mut action = None;
     let mut changed = false;
-    let frame = app.storyboard.sb.as_ref().and_then(|s| s.shots[i].frame.clone());
-    let aspect = app.storyboard.sb.as_ref().map_or(Aspect::Portrait, |s| s.aspect);
+    let (has_character, uses, aspect, frame, approved) = {
+        let Some(sb) = app.storyboard.sb.as_ref() else { return (None, false) };
+        (sb.character.is_some(), sb.uses(i), sb.aspect, sb.shots[i].frame.clone(), sb.shots[i].approved)
+    };
+
+    ui.horizontal(|ui| {
+        if ui.add_enabled(i > 0, Button::new("◀  Previous")).clicked() {
+            app.storyboard.selected = i - 1;
+        }
+        ui.label(RichText::new(format!("Shot {} of {}", i + 1, n)).strong().size(17.0));
+        if ui.add_enabled(i + 1 < n, Button::new("Next  ▶")).clicked() {
+            app.storyboard.selected = i + 1;
+        }
+        if uses > 1 {
+            ui.label(widgets::dim(format!("used for {uses} cuts in the video")));
+        }
+    });
+    ui.add_space(4.0);
+
+    // Big frame, sized to fit the pane.
     let (rw, rh) = aspect.ratio();
-    let img_h = (card_w * rh as f32 / rw as f32).min(card_w * 1.25);
-    let img_w = img_h * rw as f32 / rh as f32;
-    egui::Frame::group(ui.style()).fill(theme::PANEL_ALT).show(ui, |ui| {
-        ui.set_width(card_w);
-        let approved = app.storyboard.sb.as_ref().is_some_and(|s| s.shots[i].approved);
-        let tex = frame.as_ref().and_then(|p| thumb(app, ui, p));
-        ui.vertical_centered(|ui| {
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(img_w, img_h), egui::Sense::hover());
-            match tex {
-                Some(t) => {
-                    ui.painter().image(t, rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
-                }
-                None => {
-                    ui.painter().rect_filled(rect, 4.0, theme::SURFACE);
-                    let text = if frame.is_some() { "loading…" } else if busy { "drawing…" } else { "not drawn yet" };
-                    ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, text, egui::FontId::proportional(13.0), theme::TEXT_DIM);
-                }
-            }
-            if approved {
-                ui.painter().rect_stroke(rect, 4.0, egui::Stroke::new(3.0_f32, theme::ACCENT));
-            }
-        });
+    let ratio = rw as f32 / rh as f32;
+    let max_h = (ui.available_height() * 0.5).max(220.0);
+    let w = ui.available_width().min(max_h * ratio);
+    let tex = frame.as_ref().and_then(|p| big_frame(app, ui, p).or_else(|| thumb(app, ui, p)));
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, w / ratio), egui::Sense::hover());
+    match tex {
+        Some(t) => {
+            ui.painter().image(t, rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
+        }
+        None => {
+            ui.painter().rect_filled(rect, 4.0, theme::SURFACE);
+            let text = if frame.is_some() { "loading…" } else if busy { "drawing…" } else { "not drawn yet" };
+            ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, text, egui::FontId::proportional(14.0), theme::TEXT_DIM);
+        }
+    }
+    if approved {
+        ui.painter().rect_stroke(rect, 4.0, egui::Stroke::new(3.0_f32, theme::ACCENT));
+        let badge = egui::Rect::from_min_size(rect.left_top() + egui::vec2(10.0, 10.0), egui::vec2(96.0, 24.0));
+        ui.painter().rect_filled(badge, 12.0, theme::ACCENT);
+        ui.painter().text(badge.center(), egui::Align2::CENTER_CENTER, "✔ Approved", egui::FontId::proportional(12.5), Color32::BLACK);
+    }
+    ui.add_space(6.0);
+
+    ScrollArea::vertical().id_salt("sb-detail").auto_shrink([false, false]).show(ui, |ui| {
         let Some(sb) = app.storyboard.sb.as_mut() else { return };
         let shot = &mut sb.shots[i];
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(format!("Shot {}", i + 1)).strong());
-            if sb_uses > 1 {
-                ui.label(widgets::dim(format!("×{sb_uses}"))).on_hover_text("Used for this many cuts in the video");
-            }
-            ui.add_enabled_ui(!busy, |ui| {
-                changed |= ui.add(egui::DragValue::new(&mut shot.seconds).range(storyboard::MIN_SHOT..=storyboard::MAX_SHOT).speed(0.1).suffix(" s")).changed();
-            });
-        });
+        let fw = ui.available_width();
         ui.add_enabled_ui(!busy, |ui| {
             let before = (shot.description.clone(), shot.motion.clone());
-            changed |= ui.add(TextEdit::multiline(&mut shot.description).desired_rows(3).desired_width(card_w).hint_text("What the frame shows")).changed();
-            changed |= ui.add(TextEdit::singleline(&mut shot.caption).desired_width(card_w).hint_text("On-screen caption (optional)")).changed();
-            changed |= ui.add(TextEdit::singleline(&mut shot.motion).desired_width(card_w).hint_text("Motion, e.g. slow push-in")).changed();
-            if has_character {
-                let mut lead = !shot.no_lead;
-                if ui.checkbox(&mut lead, "Lead appears in this shot").on_hover_text("Untick for shots of other people (e.g. a band member), then ↻ redraw the frame").changed() {
-                    shot.no_lead = !lead;
-                    changed = true;
-                }
-            }
-            if (shot.description.clone(), shot.motion.clone()) != before {
-                shot.video = None;
-            }
-            ui.horizontal_wrapped(|ui| {
-                if shot.frame.is_some() {
-                    let label = if shot.approved { RichText::new("✔ Approved").color(theme::ACCENT).strong() } else { RichText::new("Approve") };
-                    if ui.selectable_label(shot.approved, label).clicked() {
-                        shot.approved = !shot.approved;
+            ui.label(RichText::new("Scene").strong());
+            changed |= ui
+                .add(TextEdit::multiline(&mut shot.description).desired_rows(4).desired_width(fw).hint_text("What the frame shows"))
+                .changed();
+            ui.add_space(4.0);
+            ui.label(RichText::new("Camera & motion").strong());
+            changed |= ui
+                .add(TextEdit::multiline(&mut shot.motion).desired_rows(2).desired_width(fw).hint_text("Motion, e.g. slow push-in"))
+                .changed();
+            ui.add_space(4.0);
+            ui.label(RichText::new("On-screen caption").strong());
+            changed |= ui
+                .add(TextEdit::singleline(&mut shot.caption).desired_width(fw).hint_text("Optional"))
+                .changed();
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Length").strong());
+                changed |= ui
+                    .add(egui::DragValue::new(&mut shot.seconds).range(storyboard::MIN_SHOT..=storyboard::MAX_SHOT).speed(0.1).suffix(" s"))
+                    .changed();
+                if has_character {
+                    ui.add_space(12.0);
+                    let mut lead = !shot.no_lead;
+                    if ui
+                        .checkbox(&mut lead, "Lead appears in this shot")
+                        .on_hover_text("Untick for shots of other people (e.g. a band member), then redraw the frame")
+                        .changed()
+                    {
+                        shot.no_lead = !lead;
                         changed = true;
                     }
                 }
-                if ui.small_button("↻").on_hover_text("Regenerate this frame (≈ $0.07)").clicked() {
-                    action = Some(CardAction::Regenerate(i));
-                }
-                if ui.small_button("📂").on_hover_text("Swap in your own image").clicked() {
-                    action = Some(CardAction::Swap(i));
-                }
-                if i > 0 && ui.small_button("◀").on_hover_text("Move earlier").clicked() {
-                    action = Some(CardAction::Left(i));
-                }
-                if i + 1 < n && ui.small_button("▶").on_hover_text("Move later").clicked() {
-                    action = Some(CardAction::Right(i));
-                }
-                if n > 1 && ui.small_button("🗑").on_hover_text("Remove this shot").clicked() {
-                    action = Some(CardAction::Remove(i));
-                }
             });
+            if (shot.description.clone(), shot.motion.clone()) != before {
+                shot.video = None;
+            }
+        });
+        ui.add_space(8.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
+            if shot.frame.is_some() {
+                let (label, fill) = if shot.approved {
+                    ("✔ Approved — click to undo", theme::ACCENT.gamma_multiply(0.55))
+                } else {
+                    ("✔ Approve this shot", theme::SURFACE)
+                };
+                if ui.add(Button::new(RichText::new(label).strong()).fill(fill).min_size(egui::vec2(200.0, 30.0))).clicked() {
+                    shot.approved = !shot.approved;
+                    changed = true;
+                }
+            }
+            if ui
+                .add_enabled(!busy, Button::new("↻  Regenerate frame").min_size(egui::vec2(0.0, 30.0)))
+                .on_hover_text("Redraw this frame (≈ $0.07)")
+                .clicked()
+            {
+                action = Some(CardAction::Regenerate(i));
+            }
+            if ui.add(Button::new("📂  Use my own image…").min_size(egui::vec2(0.0, 30.0))).clicked() {
+                action = Some(CardAction::Swap(i));
+            }
+            if ui.add_enabled(i > 0, Button::new("◀ Move earlier").min_size(egui::vec2(0.0, 30.0))).clicked() {
+                action = Some(CardAction::Left(i));
+            }
+            if ui.add_enabled(i + 1 < n, Button::new("Move later ▶").min_size(egui::vec2(0.0, 30.0))).clicked() {
+                action = Some(CardAction::Right(i));
+            }
+            if ui.add_enabled(n > 1, Button::new("🗑  Remove").min_size(egui::vec2(0.0, 30.0))).on_hover_text("Remove this shot").clicked() {
+                action = Some(CardAction::Remove(i));
+            }
         });
     });
     (action, changed)
@@ -544,27 +669,47 @@ fn board_stage(ui: &mut Ui, app: &mut EditorApp) {
         }
     });
     let n = sb.shots.len();
-    let avail = ui.available_width();
-    let cols = ((avail / 230.0).floor() as usize).clamp(1, 6);
-    let card_w = (avail / cols as f32) - 22.0;
+    let approved_n = sb.shots.iter().filter(|s| s.approved).count();
+    let sel = app.storyboard.selected.min(n.saturating_sub(1));
+    app.storyboard.selected = sel;
+    let body_h = (ui.available_height() - 120.0).max(340.0);
     let mut action = None;
-    ScrollArea::vertical().max_height(ui.available_height() - 150.0).auto_shrink([false, true]).show(ui, |ui| {
-        for row in (0..n).collect::<Vec<_>>().chunks(cols) {
-            ui.horizontal_top(|ui| {
-                for &i in row {
-                    let (a, c) = shot_card(ui, app, i, n, card_w, busy);
-                    action = action.or(a);
-                    changed |= c;
+    ui.horizontal_top(|ui| {
+        ui.allocate_ui_with_layout(egui::vec2(STRIP_W, body_h), egui::Layout::top_down(egui::Align::Min), |ui| {
+            ui.set_width(STRIP_W);
+            ui.label(widgets::dim(format!("{approved_n} of {n} shots approved")));
+            ScrollArea::vertical().id_salt("sb-strip").max_height(body_h - 26.0).auto_shrink([false, false]).show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 6.0;
+                for i in 0..n {
+                    if strip_row(ui, app, i, i == sel) {
+                        app.storyboard.selected = i;
+                    }
                 }
             });
-        }
+        });
+        ui.add_space(8.0);
+        ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), body_h), egui::Layout::top_down(egui::Align::Min), |ui| {
+            let (a, c) = shot_detail(ui, app, sel, n, busy);
+            action = a;
+            changed |= c;
+        });
     });
     let Some(sb) = app.storyboard.sb.as_mut() else { return };
     if let Some(a) = action {
         match a {
-            CardAction::Left(i) => sb.swap(i, i - 1),
-            CardAction::Right(i) => sb.swap(i, i + 1),
-            CardAction::Remove(i) => sb.remove_shot(i),
+            CardAction::Left(i) => {
+                sb.swap(i, i - 1);
+                app.storyboard.selected = i - 1;
+            }
+            CardAction::Right(i) => {
+                sb.swap(i, i + 1);
+                app.storyboard.selected = i + 1;
+            }
+            CardAction::Remove(i) => {
+                sb.remove_shot(i);
+                let last = sb.shots.len().saturating_sub(1);
+                app.storyboard.selected = app.storyboard.selected.min(last);
+            }
             CardAction::Swap(i) => {
                 if let Some(p) = rfd::FileDialog::new().add_filter("Images", &["png", "jpg", "jpeg", "webp"]).pick_file() {
                     let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("png").to_ascii_lowercase();
@@ -727,8 +872,8 @@ pub fn window(ctx: &Context, app: &mut EditorApp) {
         .open(&mut open)
         .collapsible(false)
         .resizable(true)
-        .default_size([screen.width().min(1100.0) - 40.0, screen.height().min(820.0) - 60.0])
-        .default_pos(screen.center() - egui::vec2(screen.width().min(1100.0) / 2.0 - 20.0, screen.height().min(820.0) / 2.0 - 30.0))
+        .default_size([screen.width().min(1380.0) - 40.0, screen.height().min(900.0) - 60.0])
+        .default_pos(screen.center() - egui::vec2(screen.width().min(1380.0) / 2.0 - 20.0, screen.height().min(900.0) / 2.0 - 30.0))
         .show(ctx, |ui| {
             if app.ai.settings.api_key().is_none() {
                 ui.label(RichText::new("Add your OpenRouter key first.").color(theme::DANGER));
