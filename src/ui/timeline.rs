@@ -403,13 +403,17 @@ fn lanes(ui: &mut Ui, app: &mut EditorApp) {
     let t2x = move |t: f64| body.left() + ((t - sx) * pps) as f32;
     let x2t = move |x: f32| sx + (x - body.left()) as f64 / pps;
 
-    let mut lane_rows: Vec<(usize, f32, f32)> = Vec::new();
-    let mut y = body.top() + 6.0 - app.timeline.scroll_y;
-    for (i, t) in app.project.tracks.iter().enumerate() {
-        let h = track_height(t.kind);
-        lane_rows.push((i, y, y + h));
-        y += h + TRACK_GAP;
-    }
+    let build_lane_rows = |app: &EditorApp| {
+        let mut rows: Vec<(usize, f32, f32)> = Vec::new();
+        let mut y = body.top() + 6.0 - app.timeline.scroll_y;
+        for (i, t) in app.project.tracks.iter().enumerate() {
+            let h = track_height(t.kind);
+            rows.push((i, y, y + h));
+            y += h + TRACK_GAP;
+        }
+        rows
+    };
+    let mut lane_rows = build_lane_rows(app);
 
     // Background click: deselect + seek. Created first so clips get priority.
     let bg = ui.interact(body, ui.id().with("tl-bg"), Sense::click());
@@ -764,6 +768,8 @@ fn lanes(ui: &mut Ui, app: &mut EditorApp) {
     }
 
     update_drag(app, &ctx, &lane_rows, x2t, pps);
+    // Releasing a drag removes empty tracks, so the lane indices may be stale.
+    lane_rows = build_lane_rows(app);
     if let Some(d) = &app.timeline.drag {
         ctx.set_cursor_icon(if d.mode == DragMode::Move { CursorIcon::Grabbing } else { CursorIcon::ResizeHorizontal });
     }

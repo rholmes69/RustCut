@@ -42,6 +42,13 @@ impl Engine {
 
 /// Finds a usable speech-to-text engine.
 pub fn detect_engine() -> Option<Engine> {
+    // An explicit RUSTCUT_WHISPER wins over the FFmpeg filter (some FFmpeg builds ship a filter that crashes).
+    if let Ok(bin) = std::env::var("RUSTCUT_WHISPER") {
+        let ok = ffmpeg::command(&bin).arg("--help").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
+        if ok {
+            return Some(Engine::WhisperCli(bin));
+        }
+    }
     let out = ffmpeg::command(&ffmpeg::ffmpeg_bin())
         .args(["-hide_banner", "-h", "filter=whisper"])
         .stdout(Stdio::piped())
@@ -338,9 +345,10 @@ fn run_plan(
         match engine {
             Engine::FfmpegFilter => {
                 let whisper = format!(
-                    "aresample=16000,whisper=model='{}':language={lang}:translate={}:queue=20:destination='{}':format=srt{}",
+                    "aresample=16000,whisper=model='{}':language={lang}{}:queue=20:destination='{}':format=srt{}",
                     ffmpeg::filter_path(&opts.model),
-                    opts.translate as u8,
+                    // Newer FFmpeg builds dropped the `translate` option, so only pass it when asked for.
+                    if opts.translate { ":translate=1" } else { "" },
                     ffmpeg::filter_path(&srt_path),
                     opts.max_len.map_or(String::new(), |n| format!(":max_len={n}")),
                 );
