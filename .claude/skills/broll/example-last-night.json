@@ -1,0 +1,27 @@
+[
+  {
+    "description": "Extreme close-up low across a polished dark-wood speakeasy bar top, past crystal coupe glasses and brass fixtures, as a bartender's hand pours amber whiskey over a single clear ice sphere. Haze drifts through the frame; magenta neon and amber uplighting reflect in the liquid and glassware. Shallow depth of field. No readable text or logos.",
+    "motion": "Low gimbal glide along the bar top arriving on the pour, slow motion, liquid swirling around the ice.",
+    "seconds": 4.0
+  },
+  {
+    "description": "A smartphone lying face-up on a velvet lounge booth table, its vertical screen glowing with a glossy, over-filtered social media story of soft abstract pink and gold shapes (no readable text, no logos). Behind it, the real lounge: deep indigo haze, magenta neon and warm bokeh of a crowd.",
+    "motion": "Camera starts directly above the glowing screen, then rolls slowly 180 degrees and rises as the screen's glow blooms and dissolves into the richer real lounge behind it.",
+    "seconds": 4.0
+  },
+  {
+    "description": "Intimate tabletop close-up in a warm quiet corner of a lounge: two half-empty cocktail glasses and a flickering candle on dark wood. On the left, a Black woman's hand with warm deep-brown skin, long nude almond nails and a thin gold bracelet; on the right, a Black man's hand with brown skin at the cuff of a charcoal grey suit jacket. The two hands rest a few inches apart, not yet touching. Warm tungsten gold light, everything beyond the table melting into dark bokeh. No faces.",
+    "motion": "Slow steady push-in at table height as the two hands slowly inch toward each other until the fingertips just touch.",
+    "seconds": 4.0
+  },
+  {
+    "description": "Low-angle shot just above an empty rain-slicked city sidewalk at night, puddles mirroring neon magenta and steel-blue streetlights. Two pairs of feet walking in step toward camera: a woman's strappy heels with the hem of a burgundy satin dress beside a man's polished black dress shoes. Light rain, glistening pavement. No faces.",
+    "motion": "Gimbal skims backward just above the ground as the feet splash softly through the reflections in slow motion, then slow and turn toward each other.",
+    "seconds": 4.0
+  },
+  {
+    "description": "View from inside a minimalist apartment through sheer white curtains at a city skyline at the turn from blue hour to sunrise: city lights still twinkling while warm golden light breaks over the rooftops and the curtains glow amber. Soft diffused light, warm creams. No people.",
+    "motion": "Slow sideways motion-lapse drift along the window as the city lights fade out and golden sunrise light floods in, curtains stirring in a faint breeze.",
+    "seconds": 4.0
+  }
+]

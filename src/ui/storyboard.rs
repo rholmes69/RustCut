@@ -374,16 +374,20 @@ fn brief_stage(ui: &mut Ui, app: &mut EditorApp) {
     }
     let mv = app.storyboard.music_video;
     ui.label(RichText::new(if mv { "What's the video's idea?" } else { "What should the video be?" }).strong());
-    ui.add(
-        TextEdit::multiline(&mut app.storyboard.brief)
-            .hint_text(if mv {
-                "e.g. neon city at night, a lonely dancer in a red jacket, rain, slow motion in the verses and fast cuts in the chorus"
-            } else {
-                "e.g. 30-second ad for a neighbourhood coffee shop called Ember, warm and cozy, ends with “Visit us today”"
-            })
-            .desired_rows(3)
-            .desired_width(f32::INFINITY),
-    );
+    // A long pasted treatment scrolls inside its own box instead of pushing the buttons off the window.
+    let box_height = (ui.ctx().screen_rect().height() * 0.35).clamp(120.0, 420.0);
+    egui::ScrollArea::vertical().id_salt("sb-brief").max_height(box_height).auto_shrink([false, true]).show(ui, |ui| {
+        ui.add(
+            TextEdit::multiline(&mut app.storyboard.brief)
+                .hint_text(if mv {
+                    "e.g. neon city at night, a lonely dancer in a red jacket, rain, slow motion in the verses and fast cuts in the chorus"
+                } else {
+                    "e.g. 30-second ad for a neighbourhood coffee shop called Ember, warm and cozy, ends with “Visit us today”"
+                })
+                .desired_rows(3)
+                .desired_width(f32::INFINITY),
+        );
+    });
     ui.horizontal(|ui| {
         let g = &mut app.storyboard;
         if mv {
@@ -883,10 +887,13 @@ pub fn window(ctx: &Context, app: &mut EditorApp) {
                 return;
             }
             if app.storyboard.sb.is_none() {
-                brief_stage(ui, app);
-                if matches!(app.storyboard.job, Some(Job::Plan(_))) {
-                    footer_progress(ui, app);
-                }
+                // The whole first page scrolls too, so its buttons stay reachable on short screens.
+                egui::ScrollArea::vertical().id_salt("sb-brief-page").auto_shrink([false, false]).show(ui, |ui| {
+                    brief_stage(ui, app);
+                    if matches!(app.storyboard.job, Some(Job::Plan(_))) {
+                        footer_progress(ui, app);
+                    }
+                });
             } else {
                 board_stage(ui, app);
             }

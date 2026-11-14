@@ -5,6 +5,8 @@ description: Make characters in a RustCut timeline lip-sync to a song or dialogu
 
 # Lip-sync in RustCut
 
+**For a new singing scene of the lead** (draw a still, make a performance shot, fix the sync timing), use `/singing-scene`. Its `fit` and `apply` steps also fix the timing of any performance shot made here: Seedance takes play about 9% slow at 1× speed.
+
 ## Rules
 - **Ask before spending money.** Always do a dry run or estimate first and quote the price.
 - **Never print the fal.ai key.** RustCut reads it from `%APPDATA%\RustCut\ai.json` (`fal_key`) or `FAL_KEY`. If it seems missing from here, see the AppData note in `/music-video` (Claude's package shadow copy), and check with `grep -c '"fal_key": "'`, never by printing it.
