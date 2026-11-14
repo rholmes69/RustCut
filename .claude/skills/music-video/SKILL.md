@@ -5,7 +5,7 @@ description: Make a complete AI music video in RustCut from a song, lyrics and a
 
 # Make a music video in RustCut
 
-Proven on "Checklist", "Under The Influence" and "Bond Money" (about $3.70–4.70 each).
+Proven on "Checklist", "Under The Influence", "Bond Money" and "Last Night" (about $3.70–5.20 each). Last Night's full making-of, including a `theme.txt` to copy, is in `Videos\RustCut AI\Last Night music video\WORKFLOW - making of Last Night.md`.
 
 ## Rules (always)
 - **Ask before spending money.** Give an estimate first, and stop after the stills so the user can review them before animating.
@@ -37,12 +37,19 @@ with `D="C:/Users/sales/Videos/RustCut AI/<Title> music video"`.
 
 ## Steps (pipeline test)
 1. **Set up `$D`.** Copy in the song (usually in `C:\Users\sales\Downloads`), the lead's reference photo (Aishyla's is `Videos\RustCut AI\Checklist music video\aishyla-reference.png`) and any character sheets the user provides.
+   - **Clean the reference photos:** crop social-media screenshots down to just the person, with no phone frame, profile card or buttons, or the stills copy that UI.
+   - **Several looks of one person:** put them side by side in one image (`ffmpeg … hstack`) and use it as that person's single cast entry.
 2. **Write `lyrics.txt`.** Keep the `[Section]` headers and the sung lines only. Remove markdown (`###`, `*`), stage directions like `*(Music swells…)*` and performance notes like `(Whispered)`.
+   - **Check which version the recording sings.** Transcribe it for free with FFmpeg's whisper filter (model `%LOCALAPPDATA%\RustCut\models\ggml-tiny.bin`; the command is in the Last Night workflow) and compare. Last Night had two lyric versions with different points of view, and the remix ends before the longer version's outro.
+   - **Cast from who sings to whom:** the lyrics' point of view decides the casting, even where the treatment says otherwise.
+   - **Missing or cut-off lyrics:** if the user's paste has no lyrics or stops mid-line, say so and ask before using the transcript.
 3. **prepare (free):** `MV_STAGE=prepare MV_SONG=<mp3> MV_LYRICS="$D/lyrics.txt" MV_ASPECT=16:9 MV_LYRIC_STYLE=lines`. Report the song length, BPM, sections and how many lyric lines were aligned. Keep the lyrics' `[Section]` headers: prepare replaces the loudness-guessed sections with them (it prints `section … verse/chorus/bridge…` lines). Without headers, a song that is loud throughout gets labelled almost entirely "chorus" and the story cycles out of order.
 4. **Character sheets for new characters (paid, ask first):** `MV_STAGE=sheet MV_SHEET_NAME=<Name> MV_SHEET_PROMPT="<age, ethnicity, hair, build, outfit>"` writes `$D/<name>-character-sheet.png`. Show it to the user.
 5. **Write `theme.txt`:** the concept, the look (e.g. night scenes cold and fluorescent, flashbacks warm and golden), the characters, and the story mapped to the song's sections. Name cast members exactly as in `MV_CAST` in the scenes they appear in, because a shot only gets a person's photo when its description names them. Spell out the emotional beats the user asked for.
+   - **Give every cast member a wardrobe by scene,** the male lead included. Otherwise his character sheet's own clothes leak in: Aidan's denim jacket showed up in 5 of the Last Night shots.
+   - **Keep one outfit per continuous stretch of story:** don't change clothes in the middle of a single night.
 6. **Estimate and get approval** for the sheets, plan and stills.
-7. **Choose the shot mode.** For a narrative idea or a timed treatment, use `MV_MODE=story`: story shots run in song order, each over its own stretch, with about a quarter of the shots as recurring performance setups. The default (`sections`) reuses a section's shots in its repeats (2nd chorus…), which suits performance videos but makes a story go backwards. Preview the cut plan for free with `MV_STAGE=outline MV_SHOTS=<n> MV_MODE=story` (it prints the shot list the text model will get).
+7. **Choose the shot mode.** For a narrative idea or a timed treatment, **always** use `MV_MODE=story` (forgetting it on Last Night gave a first cut with repeated, out-of-order shots): story shots run in song order, each over its own stretch, with about a quarter of the shots as recurring performance setups. The default (`sections`) reuses a section's shots in its repeats (2nd chorus…), which suits performance videos but makes a story go backwards. Preview the cut plan for free with `MV_STAGE=outline MV_SHOTS=<n> MV_MODE=story` (it prints the shot list the text model will get).
    **plan (paid):** `MV_STAGE=plan MV_SHOTS=<n> MV_MODE=<story|sections> MV_CAST="Aishyla=$D/aishyla-reference.png;Name=$D/name-character-sheet.png" MV_THEME="$(cat "$D/theme.txt")"`. This also draws every still.
 8. **Contact sheet:**
    ```bash
@@ -50,8 +57,13 @@ with `D="C:/Users/sales/Videos/RustCut AI/<Title> music video"`.
    ```
    Look at it yourself and list the problems: a character's look leaking into another's shot, garbled signs, shots that don't fit the story. Send it to the user and ask which shots to redraw, then whether to animate (≈ shots × $0.135).
 9. **redraw (paid, ≈ $0.07 per shot):** `MV_STAGE=redraw MV_REDRAW="12,18" MV_DESC_12="…" MV_MOTION_12="…" [MV_NO_LEAD="3"]`. To keep a character's look out of another person's shot, leave their name out of the description. Show the redrawn stills.
+   - **Wrong clothes:** name the outfit in full and add "(no denim)" or whatever leaked in.
+   - **The lead doesn't look like herself** (wide or side-on shots): redraw as a medium three-quarter shot facing the camera, with the face lit, and list her signature features. Compare the new still with the reference side by side.
+   - Pass the same `MV_CAST` to `redraw` as to `plan`.
 10. **produce (paid):** `MV_STAGE=produce`, run in the background (about 2–10 minutes). It animates the shots, assembles them on the beat with the lyrics, and exports `$D/<Title> - music video (preview 720p).mp4`.
-11. **Check and report:** sample frames (`fps=1/20,tile=4x4`), confirm the video is as long as the song, send the video, and give the total cost with a breakdown. Suggest next steps: `/lip-sync` on close-up singing shots, `/reshoot` for weak cuts, and a 1080p export from RustCut.
+11. **Check and report:** sample frames (`fps=1/20,tile=4x4`), confirm the video is as long as the song, send the video, and give the total cost with a breakdown. Suggest next steps: `/broll` for treatment-based cutaways (about $0.20 a shot),
+`/lip-sync` on close-up singing shots, `/reshoot` for weak cuts, and a 1080p export from RustCut.
+12. **Hand off:** if the user already has a project file elsewhere (e.g. `Downloads\<Title>.rcproj`), back it up as `<Title>.before-storyboard.rcproj`, then copy the finished `.rcproj` over it. The project must be closed in RustCut while you do this.
 
 ## Reference shots (tagged images)
 For a shot that needs specific references beyond the cast (an animal, a prop, a location), use Seedance 2.0 with tags instead of `newshot`: `@ImageN` is the N-th image given, max 9. Dry run first (free), then ask before spending (≈ $0.24/s fast, $0.30/s best):
