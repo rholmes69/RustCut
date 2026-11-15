@@ -794,15 +794,24 @@ total spent: ${:.3}", sb.dir.display(), sb.spent);
             }
             "sheet" => {
                 // A character reference sheet from a description: MV_SHEET_NAME="Saivon" MV_SHEET_PROMPT="…"
+                // [MV_SHEET_REF=<photo>] keeps that person's face; the description still sets hair and outfit.
                 let client = Client::from_settings(&settings).expect("OpenRouter key");
                 let name = std::env::var("MV_SHEET_NAME").expect("MV_SHEET_NAME");
                 let look = std::env::var("MV_SHEET_PROMPT").expect("MV_SHEET_PROMPT");
+                let reference = std::env::var("MV_SHEET_REF").ok().map(std::path::PathBuf::from);
+                let face = if reference.is_some() {
+                    " The person is the woman in the reference image: keep her exact face, facial features, skin tone, makeup and baby-hair edges, \
+                     but give her the hairstyle and outfit described here, not the ones in the reference."
+                } else {
+                    ""
+                };
                 let prompt = format!(
-                    "Photorealistic character reference sheet of one person, {name}: {look}. Same person shown four times on a plain light-grey studio background: \
+                    "Photorealistic character reference sheet of one person, {name}: {look}.{face} Same person shown four times on a plain light-grey studio background: \
                      full-body front view, full-body three-quarter view, full-body side profile, and a head-and-shoulders close-up of the face. \
                      Consistent face, hairstyle, skin tone, outfit and accessories in every view. Soft even studio lighting, sharp detail, no text, no labels, no watermark."
                 );
-                let req = crate::ai::image_gen::ImageRequest { model: settings.image_model.clone(), prompt, aspect_ratio: Some("16:9".into()), resolution: None, transparent: false, references: vec![] };
+                let references = reference.iter().map(|p| (std::fs::read(p).expect("MV_SHEET_REF"), crate::ai::storyboard::mime_for(p))).collect();
+                let req = crate::ai::image_gen::ImageRequest { model: settings.image_model.clone(), prompt, aspect_ratio: Some("16:9".into()), resolution: None, transparent: false, references };
                 let img = crate::ai::image_gen::generate(&client, &req).unwrap();
                 let path = crate::ai::image_gen::save(&img, &dir, &format!("{}-character-sheet", crate::ai::video_gen::slug(&name))).unwrap();
                 println!("sheet: {} (${:.3})", path.display(), img.cost.unwrap_or(0.0));

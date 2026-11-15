@@ -37,6 +37,7 @@ enum ClipMenu {
     ColorMatch,
     Reverse,
     Ramp(crate::media::retime::Ramp),
+    EditGraphic,
 }
 
 fn track_height(kind: TrackKind) -> f32 {
@@ -502,6 +503,12 @@ fn lanes(ui: &mut Ui, app: &mut EditorApp) {
                         pick(ClipMenu::Duplicate);
                         ui.close_menu();
                     }
+                    if media.is_some_and(|m| crate::motion_graphics::folder_of(&m.path).is_some())
+                        && ui.button("✏  Edit graphic…").on_hover_text("Change the text, colour or length and re-render it").clicked()
+                    {
+                        pick(ClipMenu::EditGraphic);
+                        ui.close_menu();
+                    }
                     let video = media.is_some_and(|m| m.kind == MediaKind::Video);
                     if video
                         && ui
@@ -740,6 +747,7 @@ fn lanes(ui: &mut Ui, app: &mut EditorApp) {
             ClipMenu::LipSync => crate::ui::voice::open_lipsync(app, id),
             ClipMenu::Reshoot => crate::ui::reshoot::open(app, id),
             ClipMenu::Replace => crate::ui::replace::open(app, id),
+            ClipMenu::EditGraphic => crate::ui::motion_graphics::open_edit(app, id),
             ClipMenu::Plate => crate::ui::image_gen::start(app, &ctx, crate::ai::image_gen::Job::Plate { clip: id }),
         }
     }

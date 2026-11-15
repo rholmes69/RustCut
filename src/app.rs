@@ -24,6 +24,7 @@ pub enum LeftTab {
     Filters,
     Animation,
     Captions,
+    Brand,
 }
 
 pub struct Toast {
@@ -74,6 +75,9 @@ pub struct EditorApp {
     /// "Go to time": the text being typed in the transport bar's timecode (Ctrl+G).
     pub goto: Option<String>,
     pub rough_cut: ui::rough_cut::RoughCutUi,
+    pub scene_todos: ui::scene_todos::SceneTodosUi,
+    pub motion_graphics: ui::motion_graphics::MotionGraphicsUi,
+    pub brand_kit: ui::brand_kit::BrandKitUi,
     pub toast: Option<Toast>,
     pub ffmpeg_ok: bool,
     last_title: String,
@@ -129,6 +133,9 @@ impl EditorApp {
             review: Default::default(),
             goto: None,
             rough_cut: Default::default(),
+            scene_todos: Default::default(),
+            motion_graphics: Default::default(),
+            brand_kit: Default::default(),
             toast: None,
             ffmpeg_ok: ffmpeg::is_available(),
             last_title: String::new(),
@@ -897,6 +904,7 @@ impl eframe::App for EditorApp {
         ui::retime::poll(self);
         ui::export_queue::poll(ctx, self);
         ui::review::poll(self);
+        ui::motion_graphics::poll(self);
         ui::color::poll_scopes(ctx, self);
         self.handle_shortcuts(ctx);
         self.advance_playback(ctx);
@@ -925,6 +933,8 @@ impl eframe::App for EditorApp {
         ui::review::teaser_window(ctx, self);
         ui::color::scopes_window(ctx, self);
         ui::rough_cut::window(ctx, self);
+        ui::scene_todos::window(ctx, self);
+        ui::motion_graphics::window(ctx, self);
 
         self.handle_dropped_files(ctx);
         self.draw_drag_ghost(ctx);

@@ -1,4 +1,5 @@
 pub mod ai;
+pub mod brand_kit;
 pub mod captions;
 pub mod economics;
 pub mod export_dialog;
@@ -7,9 +8,11 @@ pub mod image_gen;
 pub mod inspector;
 pub mod library;
 pub mod local_ai;
+pub mod motion_graphics;
 pub mod music;
 pub mod preview;
 pub mod rough_cut;
+pub mod scene_todos;
 pub mod smart_audio;
 pub mod storyboard;
 pub mod theme;

@@ -1219,6 +1219,66 @@ pub struct Project {
     /// Named points on the timeline, in time order (chapters, notes, cue points).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub markers: Vec<Marker>,
+    /// To-do list of new scenes still to make for this video, in the order the user keeps them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scene_todos: Vec<SceneTodo>,
+}
+
+/// Where a planned scene is: not started, being made (still drawn, animating…) or finished.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SceneStatus {
+    #[default]
+    Todo,
+    InProgress,
+    Done,
+}
+
+impl SceneStatus {
+    pub const ALL: [SceneStatus; 3] = [SceneStatus::Todo, SceneStatus::InProgress, SceneStatus::Done];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SceneStatus::Todo => "To do",
+            SceneStatus::InProgress => "In progress",
+            SceneStatus::Done => "Done",
+        }
+    }
+
+    /// Accepts "todo", "to do", "in_progress", "in progress", "doing", "done"…
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().replace(['_', '-', ' '], "").as_str() {
+            "todo" | "open" | "new" => Some(SceneStatus::Todo),
+            "inprogress" | "doing" | "started" | "wip" => Some(SceneStatus::InProgress),
+            "done" | "finished" | "complete" | "completed" => Some(SceneStatus::Done),
+            _ => None,
+        }
+    }
+}
+
+/// One new scene planned for the video.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SceneTodo {
+    /// Hand-written files may leave it out; imports assign fresh ids anyway.
+    #[serde(default)]
+    pub id: Id,
+    pub title: String,
+    /// Shot description, cast, outfit, lyric line — whatever the user wants to remember.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub notes: String,
+    #[serde(default)]
+    pub status: SceneStatus,
+    /// Where the scene goes on the timeline (seconds), once decided.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<f64>,
+}
+
+/// The standalone JSON file written by "Export list…" and read by "Import list…".
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SceneTodoFile {
+    #[serde(default)]
+    pub project: String,
+    pub scenes: Vec<SceneTodo>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1241,6 +1301,7 @@ impl Default for Project {
             thumbnail: None,
             music: Default::default(),
             markers: Vec::new(),
+            scene_todos: Vec::new(),
         }
     }
 }
@@ -1681,6 +1742,66 @@ impl Project {
         id
     }
 
+    // ── scene to-do list ─────────────────────────────────────────────────────
+
+    /// Adds a planned scene at the end of the list. Returns its id.
+    pub fn add_scene_todo(&mut self, title: impl Into<String>, notes: impl Into<String>, at: Option<f64>) -> Id {
+        let id = self.new_id();
+        let title = title.into().trim().to_string();
+        let title = if title.is_empty() { format!("Scene {}", self.scene_todos.len() + 1) } else { title };
+        self.scene_todos.push(SceneTodo { id, title, notes: notes.into().trim().to_string(), status: SceneStatus::Todo, at: at.map(|t| t.max(0.0)) });
+        id
+    }
+
+    pub fn scene_todo_mut(&mut self, id: Id) -> Option<&mut SceneTodo> {
+        self.scene_todos.iter_mut().find(|s| s.id == id)
+    }
+
+    /// Removes a planned scene; returns it if it existed.
+    pub fn remove_scene_todo(&mut self, id: Id) -> Option<SceneTodo> {
+        let i = self.scene_todos.iter().position(|s| s.id == id)?;
+        Some(self.scene_todos.remove(i))
+    }
+
+    /// Moves a planned scene up (`delta < 0`) or down the list. Returns whether it moved.
+    pub fn move_scene_todo(&mut self, id: Id, delta: i32) -> bool {
+        let Some(i) = self.scene_todos.iter().position(|s| s.id == id) else { return false };
+        let j = i as i64 + delta as i64;
+        if j < 0 || j >= self.scene_todos.len() as i64 || j == i as i64 {
+            return false;
+        }
+        let item = self.scene_todos.remove(i);
+        self.scene_todos.insert(j as usize, item);
+        true
+    }
+
+    /// (done, total).
+    pub fn scene_todo_progress(&self) -> (usize, usize) {
+        (self.scene_todos.iter().filter(|s| s.status == SceneStatus::Done).count(), self.scene_todos.len())
+    }
+
+    /// Writes the to-do list as its own pretty-printed JSON file.
+    pub fn export_scene_todos(&self, path: &Path) -> Result<()> {
+        let file = SceneTodoFile { project: self.name.clone(), scenes: self.scene_todos.clone() };
+        std::fs::write(path, serde_json::to_string_pretty(&file)?).with_context(|| format!("writing {}", path.display()))
+    }
+
+    /// Appends the scenes from a JSON file written by `export_scene_todos` (a bare array of
+    /// scenes also works). They get new ids. Returns how many were added.
+    pub fn import_scene_todos(&mut self, path: &Path) -> Result<usize> {
+        let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        let scenes = match serde_json::from_str::<SceneTodoFile>(&text) {
+            Ok(f) => f.scenes,
+            Err(_) => serde_json::from_str::<Vec<SceneTodo>>(&text).context("not a scene to-do list (expected {\"scenes\": [...]})")?,
+        };
+        let n = scenes.len();
+        for mut s in scenes {
+            s.id = self.new_id();
+            self.scene_todos.push(s);
+        }
+        Ok(n)
+    }
+
     // ── markers ──────────────────────────────────────────────────────────────
 
     /// Adds a marker (or renames the one already within 0.05 s). Returns its index.
@@ -1931,6 +2052,49 @@ mod tests {
         }
         println!("{} markers from sections:
 {}", p.markers_from_sections(), p.chapters());
+    }
+
+    #[test]
+    fn scene_todos_edit_save_and_round_trip() {
+        let mut p = Project::default();
+        let a = p.add_scene_todo("Choir solo", "Aishyla in the choir robe, wide", Some(158.9));
+        let b = p.add_scene_todo("  ", "", None);
+        let c = p.add_scene_todo("Beach flashback", "", Some(-3.0));
+        assert_eq!(p.scene_todos[1].title, "Scene 2");
+        assert_eq!(p.scene_todos[2].at, Some(0.0));
+        assert!(p.move_scene_todo(c, -2));
+        assert_eq!(p.scene_todos.iter().map(|s| s.id).collect::<Vec<_>>(), vec![c, a, b]);
+        assert!(!p.move_scene_todo(c, -1));
+        p.scene_todo_mut(a).unwrap().status = SceneStatus::Done;
+        assert_eq!(p.scene_todo_progress(), (1, 3));
+
+        // Saved inside the project JSON, and old projects without the field still load.
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(json.contains("\"scene_todos\"") && json.contains("\"status\":\"done\""));
+        let back: Project = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.scene_todos, p.scene_todos);
+        let old: Project = serde_json::from_str(&serde_json::to_string(&Project::default()).unwrap()).unwrap();
+        assert!(old.scene_todos.is_empty());
+
+        // Standalone JSON export / import (fresh ids; a bare hand-written array also works).
+        let dir = std::env::temp_dir().join(format!("rustcut-scene-todos-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("scenes.json");
+        p.export_scene_todos(&file).unwrap();
+        let mut q = Project::default();
+        assert_eq!(q.import_scene_todos(&file).unwrap(), 3);
+        assert_eq!(q.scene_todos.iter().map(|s| &s.title).collect::<Vec<_>>(), p.scene_todos.iter().map(|s| &s.title).collect::<Vec<_>>());
+        assert_eq!(q.scene_todos[1].status, SceneStatus::Done);
+        let bare = dir.join("bare.json");
+        std::fs::write(&bare, r#"[{"title":"Rain dance","status":"in_progress"}]"#).unwrap();
+        assert_eq!(q.import_scene_todos(&bare).unwrap(), 1);
+        assert_eq!(q.scene_todos[3].status, SceneStatus::InProgress);
+        assert_eq!(q.scene_todos.iter().map(|s| s.id).collect::<std::collections::HashSet<_>>().len(), 4);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(p.remove_scene_todo(b).is_some() && p.remove_scene_todo(b).is_none());
+        assert_eq!(SceneStatus::parse("In progress"), Some(SceneStatus::InProgress));
+        assert_eq!(SceneStatus::parse("nope"), None);
     }
 
     #[test]

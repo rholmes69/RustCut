@@ -97,6 +97,16 @@ pub fn show(ctx: &Context, app: &mut EditorApp) {
                         app.clip_board.open = true;
                         ui.close_menu();
                     }
+                    if ui.button("✨ Motion graphics (HyperFrames)…").on_hover_text("Animated title cards, name tags and lyric lines over your footage (free, rendered on your computer)").clicked() {
+                        crate::ui::motion_graphics::open_new(app);
+                        ui.close_menu();
+                    }
+                    let (done, total) = app.project.scene_todo_progress();
+                    let todo_label = if total == 0 { "📝 Scene to-do list…".to_string() } else { format!("📝 Scene to-do list ({done}/{total} done)…") };
+                    if ui.button(todo_label).on_hover_text("New scenes still to make for this video").clicked() {
+                        app.scene_todos.open = true;
+                        ui.close_menu();
+                    }
                     if ui.button("📊 Scopes (histogram, waveform, vectorscope)…").clicked() {
                         app.color.scopes_open = true;
                         ui.close_menu();
