@@ -3,6 +3,7 @@
 
 pub mod ai;
 pub mod app;
+pub mod brand_kit;
 pub mod captions;
 pub mod economics;
 pub mod export;
@@ -11,6 +12,7 @@ pub mod mcp;
 pub mod lyrics;
 pub mod media;
 pub mod model;
+pub mod motion_graphics;
 pub mod playback;
 pub mod multicam;
 pub mod music;

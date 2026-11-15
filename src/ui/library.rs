@@ -26,6 +26,7 @@ pub fn show(ctx: &Context, app: &mut EditorApp) {
                 LeftTab::Filters => filters_tab(ui, app),
                 LeftTab::Animation => animation_tab(ui, app),
                 LeftTab::Captions => crate::ui::captions::tab(ui, app),
+                LeftTab::Brand => crate::ui::brand_kit::tab(ui, app),
             });
         });
 }
@@ -33,7 +34,7 @@ pub fn show(ctx: &Context, app: &mut EditorApp) {
 fn tabs(ui: &mut Ui, app: &mut EditorApp) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 2.0;
-        let w = ((ui.available_width() - 10.0) / 6.0).floor();
+        let w = ((ui.available_width() - 12.0) / 7.0).floor();
         for (tab, icon, label) in [
             (LeftTab::Media, "🎬", "Media"),
             (LeftTab::Audio, "🎵", "Audio"),
@@ -41,6 +42,7 @@ fn tabs(ui: &mut Ui, app: &mut EditorApp) {
             (LeftTab::Filters, "🎨", "Filters"),
             (LeftTab::Animation, "✨", "Animate"),
             (LeftTab::Captions, "CC", "Captions"),
+            (LeftTab::Brand, "🏷", "Brand"),
         ] {
             let (rect, resp) = ui.allocate_exact_size(vec2(w, 48.0), Sense::click());
             let selected = app.left_tab == tab;
@@ -55,7 +57,7 @@ fn tabs(ui: &mut Ui, app: &mut EditorApp) {
                 ui.painter().rect_filled(rect, 6.0, theme::PANEL_ALT);
             }
             ui.painter().text(rect.center() - vec2(0.0, 8.0), Align2::CENTER_CENTER, icon, FontId::proportional(18.0), color);
-            ui.painter().text(rect.center() + vec2(0.0, 13.0), Align2::CENTER_CENTER, label, FontId::proportional(11.0), color);
+            ui.painter().text(rect.center() + vec2(0.0, 13.0), Align2::CENTER_CENTER, label, FontId::proportional(10.5), color);
             if resp.clicked() {
                 app.left_tab = tab;
             }

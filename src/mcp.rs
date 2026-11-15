@@ -199,6 +199,13 @@ impl<W: Write> Server<W> {
             "audio_react" => self.audio_react(a),
             "music_video_plan" => self.music_video_plan(a, progress),
             "best_section" => self.best_section(a),
+            "add_motion_graphic" => self.add_motion_graphic(a, progress),
+            "list_scene_todos" => Ok(self.scene_todos_json()),
+            "add_scene_todo" => self.add_scene_todo(a),
+            "update_scene_todo" => self.update_scene_todo(a),
+            "delete_scene_todo" => self.delete_scene_todo(a),
+            "brand_kit" => self.brand_kit(a),
+            "add_brand_asset" => self.add_brand_asset(a),
             _ => return Err(ToolError(format!("unknown tool: {name}"))),
         };
         self.history.commit(&self.project);
@@ -282,6 +289,173 @@ impl<W: Write> Server<W> {
                 "clips": t.clips.iter().map(|c| self.clip_json(c)).collect::<Vec<_>>(),
             })).collect::<Vec<_>>(),
         })
+    }
+
+    // ── motion graphics (HyperFrames) ────────────────────────────────────────
+
+    fn add_motion_graphic(&mut self, a: &Value, progress: Option<Value>) -> Result<Vec<Value>> {
+        use crate::motion_graphics as mg;
+        // Re-render an existing graphic clip, or make a new one.
+        let existing = match a.get("clip_id") {
+            Some(v) if !v.is_null() => {
+                let id = req_id(a, "clip_id")?;
+                let clip = self.project.clip(id).ok_or_else(|| anyhow!("no clip with id {id}"))?;
+                let m = clip.media_id().and_then(|m| self.project.media(m)).ok_or_else(|| anyhow!("clip {id} has no media"))?;
+                let dir = mg::folder_of(&m.path).ok_or_else(|| anyhow!("clip {id} is not a motion graphic made by RustCut"))?;
+                Some((id, dir))
+            }
+            _ => None,
+        };
+        let mut spec = match &existing {
+            Some((_, dir)) => mg::load_spec(dir)?,
+            None => GraphicSpecDefaults::new(opt_str(a, "template")?)?,
+        };
+        if let Some(t) = opt_str(a, "template")? {
+            spec.template = mg::Template::parse(t).ok_or_else(|| anyhow!("template must be title_card, lower_third or lyric_line"))?;
+        }
+        if let Some(s) = opt_str(a, "text")? {
+            spec.headline = s.to_string();
+        }
+        if let Some(s) = opt_str(a, "subtext")? {
+            spec.sub = s.to_string();
+        }
+        if let Some(s) = opt_str(a, "font")? {
+            spec.font = s.to_string();
+        }
+        if let Some(c) = opt_str(a, "color")? {
+            let [r, g, b, _] = parse_color(c)?;
+            spec.color = [r, g, b];
+        }
+        if let Some(d) = opt_f64(a, "duration")? {
+            spec.duration = d;
+        }
+        let mut spec = spec.for_aspect(self.project.aspect);
+        let dir = match &existing {
+            Some((_, dir)) => dir.clone(),
+            None => mg::new_folder(&crate::ai::video_gen::output_dir(self.path.as_deref()), &spec),
+        };
+        let file = {
+            let cancel = AtomicBool::new(false);
+            let mut notify = progress_notifier(&mut self.out, progress);
+            mg::render(&dir, &mut spec, &cancel, &mut notify)?.ok_or_else(|| anyhow!("render cancelled"))?
+        };
+        let (clip, media) = match existing {
+            Some((id, _)) => (id, mg::replace_in_project(&mut self.project, id, &file)?),
+            None => {
+                let start = opt_f64(a, "start")?.unwrap_or(0.0);
+                let (media, clip) = mg::add_to_project(&mut self.project, &file, start)?;
+                (clip, media)
+            }
+        };
+        let c = self.project.clip(clip).map(|c| self.clip_json(c)).unwrap_or(Value::Null);
+        Ok(text_json(&json!({ "file": file, "folder": dir, "media_id": media, "clip": c, "settings": spec })))
+    }
+
+    // ── scene to-do list ─────────────────────────────────────────────────────
+
+    fn scene_todos_json(&self) -> Vec<Value> {
+        let (done, total) = self.project.scene_todo_progress();
+        text_json(&json!({ "done": done, "total": total, "scenes": self.project.scene_todos }))
+    }
+
+    /// The kit at `folder`, else the one chosen in the app.
+    fn load_brand_kit(a: &Value) -> Result<crate::brand_kit::BrandKit> {
+        let folder = match opt_str(a, "folder")? {
+            Some(f) => PathBuf::from(f),
+            None => crate::brand_kit::saved_folder()
+                .ok_or_else(|| anyhow!("no brand kit folder chosen yet: pass `folder`, or pick one in RustCut's Brand tab"))?,
+        };
+        crate::brand_kit::load(&folder)
+    }
+
+    fn brand_kit(&mut self, a: &Value) -> Result<Vec<Value>> {
+        let k = Self::load_brand_kit(a)?;
+        let asset = |x: &crate::brand_kit::BrandAsset| json!({ "name": x.name, "path": x.path, "kind": x.kind });
+        Ok(text_json(&json!({
+            "folder": k.root,
+            "name": k.display_name(),
+            "handle": k.info.handle,
+            "colors": k.info.colors,
+            "fonts": k.info.fonts,
+            "logos": k.logos.iter().map(asset).collect::<Vec<_>>(),
+            "groups": k.groups.iter().map(|g| json!({ "name": g.name, "items": g.items.iter().map(asset).collect::<Vec<_>>() })).collect::<Vec<_>>(),
+            "warnings": k.warnings,
+        })))
+    }
+
+    fn add_brand_asset(&mut self, a: &Value) -> Result<Vec<Value>> {
+        use crate::brand_kit::Placement;
+        let k = Self::load_brand_kit(a)?;
+        let query = req_str(a, "asset")?;
+        let found = if query.eq_ignore_ascii_case("logo") { k.main_logo() } else { k.find(query) };
+        let asset = found.ok_or_else(|| anyhow!("no asset matching \"{query}\" in the brand kit (see the brand_kit tool)"))?.clone();
+        let how = match opt_str(a, "placement")? {
+            Some(p) => Placement::parse(p).ok_or_else(|| anyhow!("placement must be timeline, overlay, corner or library"))?,
+            None if k.logos.iter().any(|l| l.path == asset.path) && asset.kind == MediaKind::Image => Placement::Corner,
+            None => Placement::Timeline,
+        };
+        let start = opt_f64(a, "start")?.unwrap_or(0.0);
+        let (media, clip) = crate::brand_kit::add_to_project(&mut self.project, &asset.path, start, how)?;
+        if let (Some(c), Some(d)) = (clip, opt_f64(a, "duration")?) {
+            if let Some(c) = self.project.clip_mut(c) {
+                c.duration = d.max(crate::model::MIN_CLIP_LEN);
+            }
+        }
+        let clip_json = clip.and_then(|c| self.project.clip(c)).map(|c| serde_json::to_value(c).unwrap_or_default());
+        Ok(text_json(&json!({ "asset": asset.path, "media_id": media, "placement": format!("{how:?}").to_lowercase(), "clip": clip_json })))
+    }
+
+    fn add_scene_todo(&mut self, a: &Value) -> Result<Vec<Value>> {
+        let title = req_str(a, "title")?.to_string();
+        let notes = opt_str(a, "notes")?.unwrap_or_default().to_string();
+        let at = opt_f64(a, "at")?;
+        let status = opt_str(a, "status")?.map(parse_scene_status).transpose()?;
+        let id = self.project.add_scene_todo(title, notes, at);
+        if let (Some(st), Some(s)) = (status, self.project.scene_todo_mut(id)) {
+            s.status = st;
+        }
+        let s = self.project.scene_todos.iter().find(|s| s.id == id);
+        Ok(text_json(&json!({ "added": s })))
+    }
+
+    fn update_scene_todo(&mut self, a: &Value) -> Result<Vec<Value>> {
+        let id = req_id(a, "id")?;
+        let title = opt_str(a, "title")?.map(str::to_string);
+        let notes = opt_str(a, "notes")?.map(str::to_string);
+        let status = opt_str(a, "status")?.map(parse_scene_status).transpose()?;
+        // `at`: a number pins it, null unpins it, absent leaves it.
+        let at = match a.get("at") {
+            None => None,
+            Some(Value::Null) => Some(None),
+            Some(_) => Some(Some(req_f64(a, "at")?.max(0.0))),
+        };
+        let move_by = match a.get("move") {
+            None | Some(Value::Null) => 0,
+            Some(v) => v.as_i64().ok_or_else(|| anyhow!("`move` must be an integer"))? as i32,
+        };
+        let s = self.project.scene_todo_mut(id).ok_or_else(|| anyhow!("no scene to-do with id {id} (see list_scene_todos)"))?;
+        if let Some(t) = title {
+            s.title = t;
+        }
+        if let Some(n) = notes {
+            s.notes = n;
+        }
+        if let Some(st) = status {
+            s.status = st;
+        }
+        if let Some(t) = at {
+            s.at = t;
+        }
+        if move_by != 0 {
+            self.project.move_scene_todo(id, move_by);
+        }
+        Ok(self.scene_todos_json())
+    }
+
+    fn delete_scene_todo(&mut self, a: &Value) -> Result<Vec<Value>> {
+        let id = req_id(a, "id")?;
+        let s = self.project.remove_scene_todo(id).ok_or_else(|| anyhow!("no scene to-do with id {id}"))?;
+        Ok(vec![text(format!("Deleted scene to-do “{}”.", s.title))])
     }
 
     // ── project ──────────────────────────────────────────────────────────────
@@ -2281,6 +2455,24 @@ fn req_id(a: &Value, k: &str) -> Result<Id> {
     a.get(k).and_then(Value::as_u64).ok_or_else(|| anyhow!("`{k}` must be a non-negative integer id"))
 }
 
+/// A new graphic's starting settings for a template (its default font and length).
+struct GraphicSpecDefaults;
+
+impl GraphicSpecDefaults {
+    fn new(template: Option<&str>) -> Result<crate::motion_graphics::GraphicSpec> {
+        use crate::motion_graphics::{GraphicSpec, Template};
+        let t = match template {
+            Some(s) => Template::parse(s).ok_or_else(|| anyhow!("template must be title_card, lower_third or lyric_line"))?,
+            None => Template::TitleCard,
+        };
+        Ok(GraphicSpec { template: t, font: t.default_font().into(), duration: t.default_duration(), ..Default::default() })
+    }
+}
+
+fn parse_scene_status(s: &str) -> Result<crate::model::SceneStatus> {
+    crate::model::SceneStatus::parse(s).ok_or_else(|| anyhow!("`status` must be todo, in_progress or done (got {s:?})"))
+}
+
 fn opt_track(a: &Value, p: &Project) -> Result<Option<usize>> {
     match a.get("track_index") {
         None | Some(Value::Null) => Ok(None),
@@ -2675,6 +2867,42 @@ fn tool_definitions() -> Vec<Value> {
             "character_image": string("Photo of the lead character; every frame keeps their likeness (only for people who agreed)"),
             "cast": { "type": "array", "items": { "type": "object", "properties": { "name": { "type": "string" }, "photo": { "type": "string" } } }, "description": "Several recurring people [{name, photo}]: shots naming a person get their photo (only for people who agreed)" },
         }), &["theme"], json!({ "readOnlyHint": false, "destructiveHint": false, "openWorldHint": true })),
+        tool("add_motion_graphic", "Add motion graphic (HyperFrames)", "Renders an animated graphic with HyperFrames (local, free, ~20–40 s; needs Node.js and 1 GB free disk) to a transparent video and places it at `start` on a video track above the footage. Templates: title_card (big title + subtitle), lower_third (name tag: name + role), lyric_line (words pop in one by one). Pass `clip_id` of an existing graphic to change and re-render it in place (unset fields keep their values).", json!({
+            "template": { "type": "string", "enum": ["title_card", "lower_third", "lyric_line"], "description": "Default title_card" },
+            "text": string("Main text: the title, the name, or the lyric line"),
+            "subtext": string("Second line: subtitle/artist, role, or a smaller line under the lyric (optional)"),
+            "color": string("Accent colour #RRGGBB (default gold #E8B54A)"),
+            "font": { "type": "string", "enum": crate::motion_graphics::FONTS, "description": "Default: League Gothic for title cards, Montserrat otherwise" },
+            "duration": num("Length in seconds (1–30; default 4, lower third 5)"),
+            "start": num("Timeline position in seconds (default 0)"),
+            "clip_id": int("Re-render this existing graphic clip instead of adding a new one"),
+        }), &[], edit.clone()),
+        tool("brand_kit", "Brand kit", "The reusable brand kit shared by all projects: brand name, social handle, colours (name + hex), fonts, logos (Brand Kit folder) and asset groups (subfolders of Assets, e.g. Intros, End Cards, Images) with file paths.", json!({
+            "folder": string("Kit folder (default: the one chosen in RustCut's Brand tab)"),
+        }), &[], ro.clone()),
+        tool("add_brand_asset", "Add brand asset", "Puts a brand-kit logo or asset into the project (importing it if needed). Logos default to a small top-right corner bug above the footage; other assets go on the timeline.", json!({
+            "asset": string("File name, stem or relative path from brand_kit (partial match ok), or 'logo' for the main logo"),
+            "start": num("Timeline position in seconds (default 0)"),
+            "placement": { "type": "string", "enum": ["timeline", "overlay", "corner", "library"], "description": "timeline: main track if free, else above; overlay: full frame above the footage; corner: small logo top-right; library: import only" },
+            "duration": num("Clip length in seconds (default: the file's length, or 5 s for pictures)"),
+            "folder": string("Kit folder (default: the one chosen in RustCut's Brand tab)"),
+        }), &["asset"], edit.clone()),
+        tool("list_scene_todos", "List scene to-dos", "The project's to-do list of new scenes still to make: id, title, notes, status (todo / in_progress / done) and optional timeline spot `at` (seconds), plus done/total.", json!({}), &[], ro.clone()),
+        tool("add_scene_todo", "Add scene to-do", "Adds a new scene to the end of the project's scene to-do list (saved in the .rcproj).", json!({
+            "title": string("Short scene name, e.g. 'Choir solo in the rain'"),
+            "notes": string("Shot description, cast, outfit, lyric line…"),
+            "at": num("Where it goes on the timeline, in seconds (optional)"),
+            "status": { "type": "string", "enum": ["todo", "in_progress", "done"], "description": "Default todo" },
+        }), &["title"], edit.clone()),
+        tool("update_scene_todo", "Update scene to-do", "Changes a scene to-do's title, notes, status or timeline spot (`at`: seconds, or null to unpin), or moves it up/down the list (`move`: -1 = up one).", json!({
+            "id": int("Scene to-do id from list_scene_todos"),
+            "title": string("New title"),
+            "notes": string("New notes (replaces the old)"),
+            "status": { "type": "string", "enum": ["todo", "in_progress", "done"] },
+            "at": { "type": ["number", "null"], "description": "Timeline seconds, or null to unpin" },
+            "move": { "type": "integer", "description": "Positions to move (negative = up)" },
+        }), &["id"], edit.clone()),
+        tool("delete_scene_todo", "Delete scene to-do", "Removes a scene from the to-do list (undoable).", json!({ "id": int("Scene to-do id") }), &["id"], destructive.clone()),
         tool("best_section", "Best section of the song", "Finds the most energetic window (default 30 s, starting on a downbeat, preferring a chorus) for a TikTok/Reels cut. With apply=true, ripple-trims the project to it and fades the song in/out.", json!({
             "seconds": num("Window length (default 30)"),
             "apply": boolean("Trim the project to it (default false)"),
@@ -2779,6 +3007,7 @@ pub const COPILOT_TOOLS: &[&str] = &[
     "clear_keyframes", "auto_duck", "set_clip_audio", "detect_beats", "beat_montage", "beat_effect",
     "add_visualizer", "audio_react", "best_section", "measure_loudness", "set_transition",
     "apply_motion_preset", "export_srt", "export_lrc", "cost_report",
+    "list_scene_todos", "add_scene_todo", "update_scene_todo", "delete_scene_todo", "brand_kit", "add_brand_asset",
 ];
 
 /// The everyday subset for small local models (fewer schemas = a much faster first token).
@@ -2868,9 +3097,86 @@ mod tests {
         assert!(s.handle_line(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#).is_none());
         let r = call(&mut s, 3, "tools/list", json!({}));
         let tools = r["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 61);
+        assert_eq!(tools.len(), 68);
         assert!(tools.iter().all(|t| t["inputSchema"]["type"] == "object"));
         assert_eq!(call(&mut s, 4, "ping", json!({}))["result"], json!({}));
+    }
+
+    /// Manual, renders for real with HyperFrames (needs Node.js, 1 GB free disk):
+    /// `cargo test --lib motion_graphic_tool_live -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn motion_graphic_tool_live() {
+        let mut s = Server::new(Vec::new());
+        let dir = std::env::temp_dir().join("rustcut-mg-tool-live");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (err, out) = tool_call(&mut s, "save_project", json!({ "path": dir.join("t.rcproj") }));
+        assert!(!err, "{out}");
+        let (err, out) = tool_call(&mut s, "add_motion_graphic", json!({ "template": "lower_third", "text": "Pastor Holmes", "subtext": "Bond Money", "start": 2.0, "duration": 3 }));
+        assert!(!err, "{out}");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        let clip = v["clip"]["id"].as_u64().unwrap();
+        assert_eq!(v["clip"]["start"], 2.0);
+        assert!((v["clip"]["duration"].as_f64().unwrap() - 3.0).abs() < 0.05);
+        // Change it: longer, new text; same clip and place.
+        let (err, out) = tool_call(&mut s, "add_motion_graphic", json!({ "clip_id": clip, "text": "Pastor R. Holmes", "duration": 4 }));
+        assert!(!err, "{out}");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["clip"]["id"].as_u64(), Some(clip));
+        assert!((v["clip"]["duration"].as_f64().unwrap() - 4.0).abs() < 0.05);
+        assert_eq!(v["settings"]["version"], 2);
+        assert_eq!(v["settings"]["sub"], "Bond Money", "unset fields keep their values");
+        println!("{}", v["file"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scene_todo_tools() {
+        let mut s = Server::new(Vec::new());
+        let (err, out) = tool_call(&mut s, "add_scene_todo", json!({ "title": "Choir solo", "notes": "robe, wide", "at": 158.9 }));
+        assert!(!err, "{out}");
+        let id = serde_json::from_str::<Value>(&out).unwrap()["added"]["id"].as_u64().unwrap();
+        let (err, _) = tool_call(&mut s, "add_scene_todo", json!({ "title": "Beach", "status": "in progress" }));
+        assert!(!err);
+        let (err, out) = tool_call(&mut s, "update_scene_todo", json!({ "id": id, "status": "done", "at": null, "move": 1 }));
+        assert!(!err, "{out}");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!((v["done"].as_u64(), v["total"].as_u64()), (Some(1), Some(2)));
+        assert_eq!(v["scenes"][0]["title"], "Beach");
+        assert_eq!(v["scenes"][0]["status"], "in_progress");
+        assert_eq!(v["scenes"][1]["status"], "done");
+        assert!(v["scenes"][1].get("at").is_none());
+        assert!(tool_call(&mut s, "update_scene_todo", json!({ "id": id, "status": "maybe" })).0);
+        assert!(!tool_call(&mut s, "delete_scene_todo", json!({ "id": id })).0);
+        assert!(tool_call(&mut s, "delete_scene_todo", json!({ "id": id })).0);
+        let (_, out) = tool_call(&mut s, "list_scene_todos", json!({}));
+        assert_eq!(serde_json::from_str::<Value>(&out).unwrap()["total"], 1);
+        assert!(!tool_call(&mut s, "undo", json!({})).0);
+        let (_, out) = tool_call(&mut s, "list_scene_todos", json!({}));
+        assert_eq!(serde_json::from_str::<Value>(&out).unwrap()["total"], 2, "delete is undoable");
+    }
+
+    #[test]
+    fn brand_kit_tools() {
+        let root = std::env::temp_dir().join(format!("rustcut-mcp-brand-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        crate::brand_kit::init(&root).unwrap();
+        std::fs::create_dir_all(root.join("Assets/Intros")).unwrap();
+        std::fs::write(root.join("Assets/Intros/intro-1.mp4"), b"x").unwrap();
+        let mut s = Server::new(Vec::new());
+        let folder = root.to_string_lossy().into_owned();
+        let (err, out) = tool_call(&mut s, "brand_kit", json!({ "folder": folder }));
+        assert!(!err, "{out}");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["colors"].as_array().unwrap().len(), 3);
+        assert_eq!(v["groups"][0]["name"], "Intros");
+        assert_eq!(v["groups"][0]["items"][0]["kind"], "Video");
+        let (err, out) = tool_call(&mut s, "add_brand_asset", json!({ "folder": folder, "asset": "nothing-here" }));
+        assert!(err && out.contains("no asset matching"), "{out}");
+        let (err, out) = tool_call(&mut s, "add_brand_asset", json!({ "folder": folder, "asset": "intro", "placement": "sideways" }));
+        assert!(err && out.contains("placement"), "{out}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
