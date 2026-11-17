@@ -20,10 +20,14 @@ pub struct RefShot {
     pub model: String,
     /// "16:9", "9:16", …
     pub aspect: String,
+    /// A song/dialogue clip (≤ 15 s) the character performs, tagged `@Audio1` in the prompt.
+    pub audio: Option<PathBuf>,
 }
 
 /// "@Image 3", "@image3", "@IMAGE_3" → "@Image3" (the form the model expects).
 pub fn normalize_tags(prompt: &str) -> String {
+    let prompt = normalize_audio_tags(prompt);
+    let prompt = prompt.as_str();
     let mut out = String::with_capacity(prompt.len());
     let mut rest = prompt;
     while let Some(i) = rest.find('@') {
@@ -36,6 +40,31 @@ pub fn normalize_tags(prompt: &str) -> String {
             let digits: String = tail[gap..].chars().take_while(|c| c.is_ascii_digit()).collect();
             if !digits.is_empty() {
                 out.push_str("@Image");
+                out.push_str(&digits);
+                rest = &tail[gap + digits.len()..];
+                continue;
+            }
+        }
+        out.push('@');
+        rest = after;
+    }
+    out.push_str(rest);
+    out
+}
+
+/// "@Audio 1", "@audio_1" → "@Audio1".
+fn normalize_audio_tags(prompt: &str) -> String {
+    let mut out = String::with_capacity(prompt.len());
+    let mut rest = prompt;
+    while let Some(i) = rest.find('@') {
+        out.push_str(&rest[..i]);
+        let after = &rest[i + 1..];
+        if after.get(..5).is_some_and(|w| w.eq_ignore_ascii_case("audio")) {
+            let tail = &after[5..];
+            let gap = tail.len() - tail.trim_start_matches([' ', '_', '-']).len();
+            let digits: String = tail[gap..].chars().take_while(|c| c.is_ascii_digit()).collect();
+            if !digits.is_empty() {
+                out.push_str("@Audio");
                 out.push_str(&digits);
                 rest = &tail[gap + digits.len()..];
                 continue;
@@ -69,7 +98,12 @@ impl RefShot {
             "best" => MODELS[1].0,
             other => other,
         };
-        RefShot { prompt: normalize_tags(prompt), images, seconds: seconds.clamp(4, 15), model: model.to_string(), aspect: aspect.to_string() }
+        RefShot { prompt: normalize_tags(prompt), images, seconds: seconds.clamp(4, 15), model: model.to_string(), aspect: aspect.to_string(), audio: None }
+    }
+
+    pub fn with_audio(mut self, audio: Option<PathBuf>) -> Self {
+        self.audio = audio;
+        self
     }
 
     pub fn estimate(&self) -> f64 {
@@ -90,6 +124,14 @@ impl RefShot {
             if !p.is_file() {
                 errors.push(format!("image not found: {}", p.display()));
             }
+        }
+        if let Some(a) = &self.audio {
+            if !a.is_file() {
+                errors.push(format!("audio not found: {}", a.display()));
+            }
+        }
+        if self.audio.is_none() && self.prompt.contains("@Audio") {
+            errors.push("the prompt tags @Audio1 but no audio file is given".into());
         }
         let used = tags(&self.prompt);
         for &n in &used {
@@ -114,7 +156,7 @@ impl RefShot {
         }
         progress(0.03, "Uploading the reference images…");
         let urls = self.images.iter().map(|p| lipsync::upload(key, p, mime(p))).collect::<Result<Vec<_>>>()?;
-        let body = json!({
+        let mut body = json!({
             "prompt": self.prompt,
             "image_urls": urls,
             "duration": self.seconds.to_string(),
@@ -122,6 +164,9 @@ impl RefShot {
             "aspect_ratio": self.aspect,
             "generate_audio": false,
         });
+        if let Some(a) = &self.audio {
+            body["audio_urls"] = json!([lipsync::data_uri(a, "audio/mpeg")?]);
+        }
         let stem = format!("reference-shot-{}", crate::ai::video_gen::slug(&self.prompt));
         let mut out = out_dir.join(format!("{stem}.mp4"));
         let mut k = 2;

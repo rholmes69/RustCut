@@ -2077,12 +2077,13 @@ impl<W: Write> Server<W> {
         let prompt = opt_str(a, "prompt")?.ok_or_else(|| anyhow!("`prompt` is required"))?;
         let images: Vec<PathBuf> = a["images"].as_array().ok_or_else(|| anyhow!("`images` must be an array of image paths"))?.iter().filter_map(Value::as_str).map(PathBuf::from).collect();
         let seconds = a.get("seconds").and_then(Value::as_f64).unwrap_or(5.0).round() as u32;
-        let shot = RefShot::new(prompt, images, seconds, opt_str(a, "model")?.unwrap_or("fast"), self.project.aspect.short_label());
+        let shot = RefShot::new(prompt, images, seconds, opt_str(a, "model")?.unwrap_or("fast"), self.project.aspect.short_label()).with_audio(opt_str(a, "audio")?.map(PathBuf::from));
         let (errors, warnings) = shot.check();
         let summary = json!({
             "prompt": shot.prompt, "model": shot.model, "seconds": shot.seconds,
             "estimated_usd": (shot.estimate() * 100.0).round() / 100.0,
             "tags": shot.images.iter().enumerate().map(|(i, p)| json!({ "tag": format!("@Image{}", i + 1), "path": p.display().to_string() })).collect::<Vec<_>>(),
+            "audio": shot.audio.as_ref().map(|p| p.display().to_string()),
             "warnings": warnings, "errors": errors,
         });
         if opt_bool(a, "dry_run")?.unwrap_or(false) {
@@ -2955,6 +2956,7 @@ fn tool_definitions() -> Vec<Value> {
             "prompt": string("The shot, tagging images as @Image1, @Image2, …"),
             "images": { "type": "array", "items": { "type": "string" }, "description": "Reference image paths in tag order (max 9)" },
             "seconds": num("Length, 4–15 s (default 5)"),
+            "audio": string("Optional audio clip (≤ 15 s) the character performs/lip-syncs, tagged @Audio1 in the prompt"),
             "model": { "type": "string", "enum": ["fast", "best"] },
             "dry_run": boolean("Only check the tags and return the estimated cost"),
         }), &["prompt", "images"], json!({ "readOnlyHint": false, "destructiveHint": false, "openWorldHint": true })),
