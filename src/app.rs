@@ -77,6 +77,7 @@ pub struct EditorApp {
     pub rough_cut: ui::rough_cut::RoughCutUi,
     pub scene_todos: ui::scene_todos::SceneTodosUi,
     pub motion_graphics: ui::motion_graphics::MotionGraphicsUi,
+    pub lipsync_studio: ui::lipsync_studio::LipSyncStudioUi,
     pub brand_kit: ui::brand_kit::BrandKitUi,
     pub toast: Option<Toast>,
     pub ffmpeg_ok: bool,
@@ -135,6 +136,7 @@ impl EditorApp {
             rough_cut: Default::default(),
             scene_todos: Default::default(),
             motion_graphics: Default::default(),
+            lipsync_studio: Default::default(),
             brand_kit: Default::default(),
             toast: None,
             ffmpeg_ok: ffmpeg::is_available(),
@@ -905,6 +907,7 @@ impl eframe::App for EditorApp {
         ui::export_queue::poll(ctx, self);
         ui::review::poll(self);
         ui::motion_graphics::poll(self);
+        ui::lipsync_studio::poll(self, ctx);
         ui::color::poll_scopes(ctx, self);
         self.handle_shortcuts(ctx);
         self.advance_playback(ctx);
@@ -935,6 +938,7 @@ impl eframe::App for EditorApp {
         ui::rough_cut::window(ctx, self);
         ui::scene_todos::window(ctx, self);
         ui::motion_graphics::window(ctx, self);
+        ui::lipsync_studio::window(ctx, self);
 
         self.handle_dropped_files(ctx);
         self.draw_drag_ghost(ctx);

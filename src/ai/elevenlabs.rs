@@ -195,11 +195,32 @@ pub fn parse_voices(v: &Value) -> Vec<Voice> {
     out
 }
 
+/// The file name (without extension) a line is saved under.
+pub fn line_stem(voice_name: &str, text: &str) -> String {
+    format!("{}-{}", crate::ai::video_gen::slug(voice_name), crate::ai::video_gen::slug(text))
+}
+
+/// A line already generated in this voice with this text (so it isn't paid for twice).
+/// The slug keeps only the first words of the text, so the newest file whose sidecar text
+/// matches exactly wins; files without a sidecar match on the name alone.
+pub fn cached_line(dir: &Path, voice_name: &str, text: &str) -> Option<PathBuf> {
+    let stem = line_stem(voice_name, text);
+    let mut candidates: Vec<PathBuf> = std::iter::once(dir.join(format!("{stem}.mp3")))
+        .chain((2..50).map(|n| dir.join(format!("{stem}-{n}.mp3"))))
+        .take_while(|p| p.is_file())
+        .collect();
+    candidates.reverse();
+    candidates.into_iter().find(|p| match std::fs::read_to_string(p.with_extension("txt")) {
+        Ok(saved) => saved.trim() == text.trim(),
+        Err(_) => true,
+    })
+}
+
 /// Generates a line, saves it as MP3 in `dir`, and records the estimated cost.
 pub fn speak_to_file(client: &Client, voice: &VoiceProfile, text: &str, model: &str, s: VoiceSettings, dir: &Path, usd_per_char: f64) -> Result<PathBuf> {
     let bytes = client.speak(&voice.voice_id, text, model, s)?;
     std::fs::create_dir_all(dir)?;
-    let stem = format!("{}-{}", crate::ai::video_gen::slug(&voice.name), crate::ai::video_gen::slug(text));
+    let stem = line_stem(&voice.name, text);
     let mut path = dir.join(format!("{stem}.mp3"));
     let mut n = 2;
     while path.exists() {
@@ -207,6 +228,8 @@ pub fn speak_to_file(client: &Client, voice: &VoiceProfile, text: &str, model: &
         n += 1;
     }
     std::fs::write(&path, bytes)?;
+    // The exact text, so `cached_line` can tell lines with the same first words apart.
+    let _ = std::fs::write(path.with_extension("txt"), text.trim());
     let chars = text.chars().count() as f64;
     crate::economics::record(crate::economics::Spend {
         kind: "tts",

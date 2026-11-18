@@ -3,9 +3,11 @@
 pub mod continuity;
 pub mod copilot;
 pub mod elevenlabs;
+pub mod faces;
 pub mod highlights;
 pub mod image_gen;
 pub mod lipsync;
+pub mod lipsync_studio;
 pub mod listen;
 pub mod local;
 pub mod performance;

@@ -57,6 +57,8 @@ pub struct VideoGenUi {
     bridge: bool,
     /// Clip whose "Extend shot" window is open (from the timeline's right-click menu).
     pub extend_target: Option<Id>,
+    /// The last generated clip placed on the timeline (offered to the Lip-sync Studio).
+    pub last_clip: Option<Id>,
 }
 
 impl Default for VideoGenUi {
@@ -78,6 +80,7 @@ impl Default for VideoGenUi {
             extend_duration: 0,
             bridge: false,
             extend_target: None,
+            last_clip: None,
         }
     }
 }
@@ -160,6 +163,7 @@ pub fn poll(app: &mut EditorApp) {
                 app.selected_media = Some(media);
                 if clip.is_some() {
                     app.selection = clip;
+                    app.video_gen.last_clip = clip;
                 }
                 if let Some(item) = app.project.media(media).cloned() {
                     app.assets.ensure(&item);
@@ -408,6 +412,11 @@ pub fn window(ctx: &Context, app: &mut EditorApp) {
             if !app.video_gen.jobs.is_empty() {
                 ui.separator();
                 jobs_list(ui, app, None);
+            }
+            if let Some(id) = app.video_gen.last_clip.filter(|id| app.project.clip(*id).is_some()) {
+                if ui.button("👄 Lip-sync the last result in the Studio…").on_hover_text("Make the character in the shot you just generated sing or speak").clicked() {
+                    crate::ui::lipsync_studio::open_for(app, id);
+                }
             }
         });
 

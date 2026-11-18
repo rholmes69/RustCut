@@ -146,7 +146,7 @@ pub fn poll(app: &mut EditorApp, ctx: &Context) {
                             Err(e) => app.notify_error(format!("Clip reshot, but the lip-sync couldn't be redone: {e:#}")),
                         }
                     } else {
-                        app.notify(format!("🎬 Clip reshot and replaced (${spent:.2})"));
+                        app.notify(format!("🎬 Clip reshot and replaced (${spent:.2}) — right-click it → Lip-sync Studio to make it sing or speak"));
                     }
                 }
                 Err(e) => app.notify_error(format!("Reshoot: {e:#}")),

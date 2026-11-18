@@ -28,6 +28,7 @@ enum ClipMenu {
     Plate,
     Beats,
     LipSync,
+    LipSyncStudio,
     Reshoot,
     Replace,
     Preview,
@@ -609,6 +610,14 @@ fn lanes(ui: &mut Ui, app: &mut EditorApp) {
                             pick(ClipMenu::LipSync);
                             ui.close_menu();
                         }
+                        if ui
+                            .button("👄  Lip-sync Studio…")
+                            .on_hover_text("Shot, face and voice in one place: trim the span, pick the face, choose the method and see the cost first")
+                            .clicked()
+                        {
+                            pick(ClipMenu::LipSyncStudio);
+                            ui.close_menu();
+                        }
                     }
                     ui.separator();
                     if ui.button(RichText::new("🗑  Delete").color(theme::DANGER)).clicked() {
@@ -745,6 +754,7 @@ fn lanes(ui: &mut Ui, app: &mut EditorApp) {
                 }
             }
             ClipMenu::LipSync => crate::ui::voice::open_lipsync(app, id),
+            ClipMenu::LipSyncStudio => crate::ui::lipsync_studio::open_for(app, id),
             ClipMenu::Reshoot => crate::ui::reshoot::open(app, id),
             ClipMenu::Replace => crate::ui::replace::open(app, id),
             ClipMenu::EditGraphic => crate::ui::motion_graphics::open_edit(app, id),

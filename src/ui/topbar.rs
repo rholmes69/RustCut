@@ -221,6 +221,10 @@ pub fn show(ctx: &Context, app: &mut EditorApp) {
                         app.voice.open = true;
                         ui.close_menu();
                     }
+                    if ui.button("👄 Lip-sync Studio…").on_hover_text("Make a character sing or speak: a shot or still, a voice, a face, and a cost estimate before you spend").clicked() {
+                        crate::ui::lipsync_studio::open_new(app);
+                        ui.close_menu();
+                    }
                     if ui.button("🔀 Smart transitions (local AI, free)…").clicked() {
                         app.local.transitions_open = true;
                         ui.close_menu();
