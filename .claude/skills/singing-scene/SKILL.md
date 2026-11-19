@@ -91,7 +91,8 @@ python -I $S run --project "$P" --still "<still.png>" --start <t> --end <t> --tr
 **If fal refuses it** ("likenesses of real people", content_policy_violation): you aren't charged and the project is unchanged.
 - Don't retry the same still. Redraw it with a different angle and light: the Bond Money still was refused twice, and a **three-quarter angle** redraw passed.
 - Leave `--sheet` off: a character sheet didn't help.
-- **Fallback:** Kling v3.0 animates the still (`MV_STAGE=newshot MV_STILL=<still> MV_VIDEO_MODEL=kwaivgi/kling-v3.0-std MV_MOTION="<direction>" MV_SECONDS=<span>`, ≈ $0.92 for 11 s). Then the `lip_sync` MCP tool (lipsync-2, ≈ $0.05/s) fixes the mouth. This sync is weaker on held notes.
+- **Fallback (one call):** `lip_sync_still {image: "<still>", audio_clip_id: <song clip>, start: <t>, end: <t>, method: "animate_sync", direction: "<gestures>", dry_run: true}`, then run it without `dry_run`. It animates the still with a steady-face prompt (Wan 3.0 by default; `video_model` for Hailuo or Kling), lip-syncs it with lipsync-2-pro and places it, recording takes. ≈ $1.66 for 10.6 s; the Bond Money choir redo used exactly this chain. No speed fix is needed afterwards.
+- **By hand (old MCP server):** animate with the pipeline (`MV_STAGE=newshot MV_STILL=<still> MV_VIDEO_MODEL=alibaba/wan-3.0 MV_MOTION="<direction>" MV_SECONDS=<span+2>`), `replace_media` it into the clip, set `source_in` 1 and volume 0, then `lip_sync {model: "lipsync-2-pro"}`. Keep the mouth soft in the motion prompt: a wide-open, crying mouth gave jagged teeth after the sync.
 
 ## 6. Fix the sync (free)
 **Why:** Seedance renders about 1 s more video than the span and spreads the singing across all of it. Played at 1×, the mouth slowly falls behind the vocal. Bond Money needed **1.095×**, which is 12.04 s ÷ 11 s.

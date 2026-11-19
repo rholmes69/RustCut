@@ -427,7 +427,15 @@ pub fn window(ctx: &Context, app: &mut EditorApp) {
 
 fn lipsync_section(ui: &mut egui::Ui, app: &mut EditorApp, save: &mut bool) {
     use crate::ai::lipsync;
-    ui.label(RichText::new("👄 Lip-sync a character to dialogue (fal.ai)").strong());
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("👄 Lip-sync a character to dialogue (fal.ai)").strong());
+        if ui.small_button("Open Lip-sync Studio…").on_hover_text("Trim the span, pick the face, Animate + sync for stills, 1080p and takes").clicked() {
+            match app.voice.lipsync_target.or(app.selection) {
+                Some(id) => crate::ui::lipsync_studio::open_for(app, id),
+                None => crate::ui::lipsync_studio::open_new(app),
+            }
+        }
+    });
     ui.label(widgets::dim("Put the line on an audio track over the shot, pick the shot, and the part of it under the line is re-animated so the mouth matches the words. Only that part of the clip is replaced.").small());
     ui.horizontal(|ui| {
         ui.label("fal.ai key");

@@ -1222,6 +1222,10 @@ pub struct Project {
     /// To-do list of new scenes still to make for this video, in the order the user keeps them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub scene_todos: Vec<SceneTodo>,
+    /// Lip-sync takes per clip: the media the clip has used, oldest first (the original
+    /// footage, then each lip-synced result), so a take can be swapped back without undo.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub takes: BTreeMap<Id, Vec<Id>>,
 }
 
 /// Where a planned scene is: not started, being made (still drawn, animating…) or finished.
@@ -1302,6 +1306,7 @@ impl Default for Project {
             music: Default::default(),
             markers: Vec::new(),
             scene_todos: Vec::new(),
+            takes: BTreeMap::new(),
         }
     }
 }
@@ -1595,6 +1600,39 @@ impl Project {
             replaced += 1;
         }
         (replaced, retimed)
+    }
+
+    /// Records that clip `new_clip` (a lip-synced result) replaces or covers `from_clip`:
+    /// `from_clip`'s takes move to `new_clip` (starting with `original` if it had none),
+    /// then `media` is added as the newest take.
+    pub fn record_take(&mut self, from_clip: Id, new_clip: Id, original: Option<Id>, media: Id) {
+        let mut list = self.takes.remove(&from_clip).unwrap_or_default();
+        if list.is_empty() {
+            list.extend(original);
+        }
+        list.retain(|&m| m != media);
+        list.push(media);
+        self.takes.insert(new_clip, list);
+    }
+
+    /// The takes recorded for `clip` that are still in the media library.
+    pub fn takes_for(&self, clip: Id) -> Vec<Id> {
+        self.takes.get(&clip).map(|l| l.iter().copied().filter(|&m| self.media(m).is_some()).collect()).unwrap_or_default()
+    }
+
+    /// Swaps `clip` to one of its takes (muted, so the song or dialogue stays what's heard).
+    pub fn use_take(&mut self, clip: Id, media: Id) -> bool {
+        if !self.takes_for(clip).contains(&media) {
+            return false;
+        }
+        let current = self.clip(clip).and_then(|c| c.media_id());
+        if current != Some(media) && self.replace_media(&[clip], media).0 == 0 {
+            return false;
+        }
+        if let Some(c) = self.clip_mut(clip) {
+            c.volume = 0.0;
+        }
+        true
     }
 
     /// Moves a clip to `track` at `start` without overlap checks (used while dragging).
@@ -2052,6 +2090,35 @@ mod tests {
         }
         println!("{} markers from sections:
 {}", p.markers_from_sections(), p.chapters());
+    }
+
+    #[test]
+    fn lipsync_takes_follow_the_clip_and_swap_back() {
+        let mut p = Project::default();
+        let item = |name: &str| MediaItem { id: 0, path: name.into(), name: name.into(), kind: MediaKind::Video, duration: 8.0, width: 1280, height: 720, fps: 24.0, has_audio: false };
+        let a = p.add_media(item("original.mp4"));
+        let b = p.add_media(item("lipsync-1.mp4"));
+        let c = p.add_media(item("lipsync-2.mp4"));
+        let mut clip = p.new_media_clip(a, 0.0).unwrap();
+        clip.volume = 1.0;
+        let first = clip.id;
+        p.append_to_main(clip);
+        // First lip-sync: the original becomes take 1.
+        p.record_take(first, 50, Some(a), b);
+        assert_eq!(p.takes.get(&50), Some(&vec![a, b]));
+        // Second lip-sync replaces clip 50 with the real clip `first` (reusing the id here).
+        p.record_take(50, first, Some(b), c);
+        assert!(!p.takes.contains_key(&50));
+        assert_eq!(p.takes_for(first), vec![a, b, c]);
+        assert!(p.use_take(first, c));
+        assert_eq!(p.clip(first).unwrap().media_id(), Some(c));
+        assert!(p.use_take(first, a));
+        assert_eq!(p.clip(first).unwrap().media_id(), Some(a));
+        assert_eq!(p.clip(first).unwrap().volume, 0.0);
+        assert!(!p.use_take(first, 999), "not a take");
+        let back: Project = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert_eq!(back.takes, p.takes);
+        assert!(!serde_json::to_string(&Project::default()).unwrap().contains("takes"));
     }
 
     #[test]

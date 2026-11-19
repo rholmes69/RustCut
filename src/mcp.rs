@@ -178,6 +178,10 @@ impl<W: Write> Server<W> {
             "speak_line" => self.speak_line(a),
             "clone_voice" => self.clone_voice(a),
             "lip_sync" => self.lip_sync(a),
+            "lip_sync_still" => self.lip_sync_still(a, progress.clone()),
+            "detect_faces" => self.detect_faces(a),
+            "lipsync_takes" => self.lipsync_takes(a),
+            "lipsync_check" => self.lipsync_check(a),
             "performance_shot" => self.performance_shot(a, progress),
             "reference_shot" => self.reference_shot(a, progress),
             "reshoot_clip" => self.reshoot_clip(a, progress),
@@ -2021,21 +2025,257 @@ impl<W: Write> Server<W> {
     fn lip_sync(&mut self, a: &Value) -> Result<Vec<Value>> {
         use crate::ai::lipsync;
         let settings = crate::ai::openrouter::AiSettings::load();
-        let key = settings.fal_key().ok_or_else(|| anyhow!(lipsync::NO_KEY))?;
+        let key = settings.fal_key().ok_or_else(|| anyhow!(lipsync::NO_KEY));
         let video = req_id(a, "video_clip_id")?;
         let voice = a.get("voice_clip_id").and_then(Value::as_u64);
         let model = opt_str(a, "model")?.map(str::to_string).unwrap_or(settings.lipsync_model.clone());
-        let plan = lipsync::plan(&self.project, video, voice)?;
+        let quality = match opt_str(a, "quality")? {
+            Some(q) => lipsync::Quality::parse(q).ok_or_else(|| anyhow!("`quality` must be standard or high"))?,
+            None => lipsync::Quality::Standard,
+        };
+        let placement = match opt_str(a, "place")? {
+            Some(q) => lipsync::Placement::parse(q).ok_or_else(|| anyhow!("`place` must be replace or above"))?,
+            None => lipsync::Placement::Replace,
+        };
+        let span = match (opt_f64(a, "start")?, opt_f64(a, "end")?) {
+            (None, None) => None,
+            (s, e) => Some((s.unwrap_or(0.0), e.unwrap_or(f64::MAX))),
+        };
+        let fill = match opt_str(a, "fill")? {
+            Some(f) => lipsync::Fill::parse(f).ok_or_else(|| anyhow!("`fill` must be none, loop, pingpong or hold"))?,
+            None => lipsync::Fill::None,
+        };
+        let mut plan = lipsync::plan_fill(&self.project, video, voice, span, fill)?;
+        plan.face = face_box_arg(a)?;
+        plan.quality = quality;
+        let secs = plan.end - plan.start;
+        let estimate = (secs * lipsync::usd_per_second(&model) * 100.0).round() / 100.0;
+        if opt_bool(a, "dry_run")?.unwrap_or(false) {
+            return Ok(text_json(&json!({
+                "start": round3(plan.start), "end": round3(plan.end), "seconds": round3(secs), "voice_clip_id": plan.voice_clip,
+                "model": model, "quality": format!("{quality:?}").to_lowercase(), "estimated_usd": estimate,
+                "face_box": plan.face.map(|f| json!({ "cx": f.cx, "cy": f.cy, "w": f.w, "h": f.h })),
+                "face_hint": plan.face.and_then(|f| crate::ai::faces::size_hint(f.h)),
+                "fill": format!("{:?}", plan.fill).to_lowercase(),
+                "next_shot_in_the_way": self.project.clip(video).and_then(|v| self.project.locate(video).map(|(ti, _)| plan.end > v.end() + 1e-3 && !self.project.fits(ti, v.end(), plan.end, Some(video)))).unwrap_or(false),
+                "voice_past_shot": self.voice_past_shot(&plan),
+            })));
+        }
+        let key = key?;
         let dir = crate::ai::video_gen::output_dir(self.path.as_deref()).join("lipsync");
         let cancel = std::sync::atomic::AtomicBool::new(false);
         let (path, info) = lipsync::lip_sync(&self.project, &plan, &key, &model, &dir, &cancel, &mut |_, _| {})?.ok_or_else(|| anyhow!("cancelled"))?;
-        let id = lipsync::apply(&mut self.project, &plan, &path, info)?;
-        let secs = plan.end - plan.start;
+        let id = lipsync::apply_with(&mut self.project, &plan, &path, info, placement)?;
         Ok(text_json(&json!({
             "file": path, "start": round3(plan.start), "end": round3(plan.end), "model": model,
-            "estimated_usd": (secs * lipsync::usd_per_second(&model) * 100.0).round() / 100.0,
+            "estimated_usd": estimate,
             "clip": self.clip_json_by_id(id),
+            "takes": self.project.takes_for(id),
         })))
+    }
+
+    /// The whole Lip-sync Studio flow from a still: places the image and the voice (a clip,
+    /// an audio file or a text-to-speech line, reused if made before), then animates and
+    /// syncs it (or makes a Seedance performance). Works on a copy until it succeeds.
+    fn lip_sync_still(&mut self, a: &Value, progress: Option<Value>) -> Result<Vec<Value>> {
+        use crate::ai::lipsync_studio::{self as st, Method, Request, Source};
+        let image = PathBuf::from(req_str(a, "image")?);
+        if !image.is_file() {
+            bail!("no image at {}", image.display());
+        }
+        let dry = opt_bool(a, "dry_run")?.unwrap_or(false);
+        let method = match opt_str(a, "method")? {
+            Some(m) => Method::parse(m).filter(|m| *m != Method::FixMouth).ok_or_else(|| anyhow!("`method` must be animate_sync or performance"))?,
+            None => Method::AnimateSync,
+        };
+        let start = opt_f64(a, "start")?;
+        let mut p = self.project.clone();
+        let mut tts = Value::Null;
+        let voice_clip = if let Some(id) = a.get("audio_clip_id").and_then(Value::as_u64) {
+            p.clip(id).ok_or_else(|| anyhow!("no audio clip {id}"))?;
+            id
+        } else if let Some(path) = opt_str(a, "audio_path")? {
+            st::place_voice(&mut p, Path::new(path), start.unwrap_or(0.0))?
+        } else {
+            let text = opt_str(a, "text")?.ok_or_else(|| anyhow!("give audio_clip_id, audio_path, or text + voice"))?;
+            let who = req_str(a, "voice")?;
+            let (settings, client) = self.elevenlabs()?;
+            let profile = self.voice_profile(&settings, &client, who)?;
+            let dir = crate::ai::video_gen::output_dir(self.path.as_deref()).join("voice");
+            let path = match crate::ai::elevenlabs::cached_line(&dir, &profile.name, text) {
+                Some(path) => {
+                    tts = json!({ "reused": path, "estimated_usd": 0.0 });
+                    path
+                }
+                None if dry => {
+                    let usd = text.chars().count() as f64 * settings.tts_usd_per_char;
+                    return Ok(text_json(&json!({
+                        "dry_run": true, "method": format!("{method:?}"),
+                        "tts": { "voice": profile.name, "characters": text.chars().count(), "estimated_usd": (usd * 10000.0).round() / 10000.0, "approx_seconds": round3(text.chars().count() as f64 / 14.0) },
+                        "hint": "The line hasn't been generated yet, so the video estimate needs its length: generate it with speak_line (place: false) first, or run without dry_run.",
+                    })));
+                }
+                None => {
+                    let model = opt_str(a, "tts_model")?.map(str::to_string).unwrap_or(settings.tts_model.clone());
+                    let s = crate::ai::elevenlabs::VoiceSettings { stability: 0.5, similarity: 0.8, style: 0.0 };
+                    let path = crate::ai::elevenlabs::speak_to_file(&client, &profile, text, &model, s, &dir, settings.tts_usd_per_char)?;
+                    tts = json!({ "generated": path, "characters": text.chars().count() });
+                    path
+                }
+            };
+            st::place_voice(&mut p, &path, start.unwrap_or(0.0))?
+        };
+        let vc = p.clip(voice_clip).cloned().ok_or_else(|| anyhow!("the voice clip was removed"))?;
+        let from = match start {
+            Some(s) if a.get("audio_clip_id").is_some() => s.max(vc.start),
+            _ => vc.start,
+        };
+        let to = match (opt_f64(a, "end")?, opt_f64(a, "seconds")?) {
+            (Some(e), _) => e.min(vc.end()),
+            (None, Some(secs)) => (from + secs).min(vc.end()),
+            (None, None) => vc.end(),
+        };
+        let len = to - from;
+        if len < 0.5 {
+            bail!("the span is too short ({len:.2} s): check `start`/`end` against the audio clip ({:.2}–{:.2})", vc.start, vc.end());
+        }
+        if len > 15.0 && opt_f64(a, "end")?.is_none() && opt_f64(a, "seconds")?.is_none() {
+            bail!("the audio runs {len:.1} s from {from:.2}: give `end` (or `seconds`) for the part to sing, e.g. one or two lyric lines (≤ 15 s per shot)");
+        }
+        let video_clip = st::place_source(&mut p, &Source::Still(image), from, len)?;
+        let mut req = Request::new(video_clip, voice_clip, method);
+        req.span = Some((from, from + len));
+        if let Some(m) = opt_str(a, "video_model")? {
+            req.video_model = m.to_string();
+        }
+        req.direction = opt_str(a, "direction")?.unwrap_or("").to_string();
+        if let Some(q) = opt_str(a, "quality")? {
+            req.quality = crate::ai::lipsync::Quality::parse(q).ok_or_else(|| anyhow!("`quality` must be standard or high"))?;
+        }
+        if let Some(m) = opt_str(a, "performance_model")? {
+            req.performance_model = if m == "best" { crate::ai::performance::MODELS[1].0.into() } else { crate::ai::performance::MODELS[0].0.into() };
+        }
+        req.sheet = opt_str(a, "character_sheet")?.map(PathBuf::from);
+        let est = st::estimate(&p, &req)?;
+        let summary = json!({
+            "method": format!("{method:?}"), "start": round3(est.start), "end": round3(est.end),
+            "estimated_usd": (est.usd * 100.0).round() / 100.0,
+            "parts": est.parts.iter().map(|(l, u)| json!({ "item": l, "usd": (u * 100.0).round() / 100.0 })).collect::<Vec<_>>(),
+            "warnings": est.warnings, "tts": tts,
+        });
+        if dry {
+            return Ok(text_json(&summary));
+        }
+        let settings = crate::ai::openrouter::AiSettings::load();
+        let fal = settings.fal_key().ok_or_else(|| anyhow!(crate::ai::lipsync::NO_KEY))?;
+        let client = crate::ai::openrouter::Client::from_settings(&settings).ok();
+        let dir = crate::ai::video_gen::output_dir(self.path.as_deref()).join("lipsync");
+        let cancel = AtomicBool::new(false);
+        let outcome = {
+            let mut notify = progress_notifier(&mut self.out, progress);
+            st::run(&p, &req, &fal, client.as_ref(), &dir, &cancel, &mut |x, s| notify(x, s))?.ok_or_else(|| anyhow!("cancelled"))?
+        };
+        if let st::Outcome::Refused { reason, suggested } = &outcome {
+            return Ok(text_json(&json!({
+                "refused": true, "reason": reason, "charged": false,
+                "suggestion": format!("retry with method {}", match suggested { Method::AnimateSync => "animate_sync", Method::Performance => "performance", Method::FixMouth => "a different still" }),
+                "estimate": summary,
+            })));
+        }
+        let ids = st::apply(&mut p, &req, outcome)?;
+        self.project = p;
+        Ok(text_json(&json!({
+            "summary": summary,
+            "clips": ids.iter().map(|&id| self.clip_json_by_id(id)).collect::<Vec<_>>(),
+            "voice_clip": self.clip_json_by_id(voice_clip),
+        })))
+    }
+
+    /// Boxes every face in a clip's frames (OpenRouter vision model, about a cent).
+    fn detect_faces(&mut self, a: &Value) -> Result<Vec<Value>> {
+        use crate::ai::faces;
+        let clip = req_id(a, "clip_id")?;
+        let c = self.project.clip(clip).cloned().ok_or_else(|| anyhow!("no clip {clip}"))?;
+        let (s, e) = (opt_f64(a, "start")?.unwrap_or(c.start), opt_f64(a, "end")?.unwrap_or(c.end()));
+        let frames = faces::sample(&self.project, clip, s, e)?;
+        let (settings, client) = self.ai_client()?;
+        let model = opt_str(a, "model")?.map(str::to_string).unwrap_or(settings.vision_model.clone());
+        let found = faces::detect(&frames, &client, &model, &AtomicBool::new(false), &mut |_, _| {})?.ok_or_else(|| anyhow!("cancelled"))?;
+        let biggest = found.frames.iter().flat_map(|f| f.faces.iter()).map(|b| b.h).fold(0.0f32, f32::max);
+        Ok(text_json(&json!({
+            "people": found.people(),
+            "frames": found.frames.iter().map(|f| json!({ "t": round3(f.t), "faces": f.faces.iter().map(|b| json!({ "cx": b.cx, "cy": b.cy, "w": b.w, "h": b.h })).collect::<Vec<_>>() })).collect::<Vec<_>>(),
+            "face_hint": faces::size_hint(biggest), "recommend_pro": faces::recommend_pro(biggest),
+            "hint": "Pass one box as lip_sync's face_box to sync only that face.",
+        })))
+    }
+
+    /// When the voice runs past the shot (without a fill), how much, and which fill suits
+    /// the footage (a ping-pong when the first and last frames differ).
+    fn voice_past_shot(&self, plan: &crate::ai::lipsync::Plan) -> Value {
+        use crate::ai::lipsync;
+        let (Some(v), Some(a)) = (self.project.clip(plan.video_clip), self.project.clip(plan.voice_clip)) else { return Value::Null };
+        let past = a.end() + 0.15 - v.end();
+        if past < 0.2 || plan.fill != lipsync::Fill::None && plan.end > v.end() {
+            return Value::Null;
+        }
+        let Some(m) = v.media_id().and_then(|m| self.project.media(m)) else { return Value::Null };
+        let seam = if m.kind == MediaKind::Image { 0.0 } else { lipsync::loop_seam(&m.path, v.source_in + (plan.start - v.start) * v.speed, v.source_in + v.duration * v.speed).unwrap_or(1.0) };
+        json!({ "seconds": round3(past), "seam": (seam * 1000.0).round() / 1000.0, "suggested_fill": format!("{:?}", lipsync::suggest_fill(seam)).to_lowercase(),
+                "hint": "The voice runs past the end of the shot: pass fill (loop, pingpong or hold) to cover it." })
+    }
+
+    /// Measures a lip-synced clip: sync score and lag, mouth detail, contact sheet.
+    fn lipsync_check(&mut self, a: &Value) -> Result<Vec<Value>> {
+        use crate::ai::lipsync_check as chk;
+        let clip = req_id(a, "clip_id")?;
+        let voice = a.get("voice_clip_id").and_then(Value::as_u64);
+        let face = face_box_arg(a)?;
+        let dir = crate::ai::video_gen::output_dir(self.path.as_deref()).join("lipsync").join("checks");
+        let sheet = opt_bool(a, "sheet")?.unwrap_or(true);
+        let c = chk::check_clip(&self.project, clip, voice, face, sheet.then_some(dir.as_path()))?;
+        let mut nudged = Value::Null;
+        if opt_bool(a, "apply_nudge")?.unwrap_or(false) && !c.reliable {
+            bail!("pass face_box (from detect_faces) before apply_nudge: without it the measured lag is noise");
+        }
+        if opt_bool(a, "apply_nudge")?.unwrap_or(false) && c.verdict != chk::Verdict::Unclear && c.lag.abs() >= 0.05 {
+            nudged = json!(chk::nudge(&mut self.project, clip, c.lag)?);
+        }
+        Ok(text_json(&json!({
+            "clip_id": clip, "verdict": c.verdict.label(), "score": (c.score * 1000.0).round() / 1000.0,
+            "lag_seconds": round3(c.lag), "mouth_detail": (c.mouth_detail * 100.0).round() / 100.0,
+            "notes": c.notes, "contact_sheet": c.sheet, "nudged": nudged, "reliable": c.reliable,
+            "scale": "score: about 0.2+ in sync, under 0.08 out of sync; lag > 0 = the mouth is late",
+        })))
+    }
+
+    /// Lists a clip's lip-sync takes, or swaps it to one.
+    fn lipsync_takes(&mut self, a: &Value) -> Result<Vec<Value>> {
+        let clip = req_id(a, "clip_id")?;
+        self.project.clip(clip).ok_or_else(|| anyhow!("no clip {clip}"))?;
+        if let Some(m) = a.get("use_media_id").and_then(Value::as_u64) {
+            if !self.project.use_take(clip, m) {
+                bail!("media {m} is not a take of clip {clip} (see lipsync_takes without use_media_id)");
+            }
+        }
+        let current = self.project.clip(clip).and_then(|c| c.media_id());
+        let takes: Vec<Value> = self
+            .project
+            .takes_for(clip)
+            .into_iter()
+            .filter_map(|m| self.project.media(m).map(|item| json!({ "media_id": m, "name": item.name, "path": item.path, "current": Some(m) == current })))
+            .collect();
+        Ok(text_json(&json!({ "clip_id": clip, "takes": takes })))
+    }
+
+    fn voice_profile(&self, settings: &crate::ai::openrouter::AiSettings, client: &crate::ai::elevenlabs::Client, who: &str) -> Result<crate::ai::elevenlabs::VoiceProfile> {
+        match settings.voice(who) {
+            Some(p) => Ok(p),
+            None => {
+                let v = client.voices()?.into_iter().find(|v| v.voice_id == who || v.name.eq_ignore_ascii_case(who)).ok_or_else(|| anyhow!("no voice or character named {who} (see list_voices)"))?;
+                Ok(crate::ai::elevenlabs::VoiceProfile { name: v.name, voice_id: v.voice_id })
+            }
+        }
     }
 
     fn performance_shot(&mut self, a: &Value, progress: Option<Value>) -> Result<Vec<Value>> {
@@ -2062,7 +2302,16 @@ impl<W: Write> Server<W> {
         let cancel = std::sync::atomic::AtomicBool::new(false);
         let results = {
             let mut notify = progress_notifier(&mut self.out, progress);
-            performance::perform(&self.project, &plan, &key, &opts, &dir, &cancel, &mut |p, s| notify(p, s))?.ok_or_else(|| anyhow!("cancelled"))?
+            match performance::perform(&self.project, &plan, &key, &opts, &dir, &cancel, &mut |p, s| notify(p, s)) {
+                Ok(r) => r.ok_or_else(|| anyhow!("cancelled"))?,
+                Err(e) if crate::ai::lipsync::is_refusal(&e) => {
+                    return Ok(text_json(&json!({
+                        "refused": true, "charged": false, "reason": format!("{e:#}").chars().take(300).collect::<String>(),
+                        "suggestion": "Seedance refused this still. Use lip_sync_still with method animate_sync (image-to-video with a steady face, then lipsync-2-pro), or redraw the still at a three-quarter angle.",
+                    })));
+                }
+                Err(e) => return Err(e),
+            }
         };
         let ids = performance::apply(&mut self.project, &plan, results)?;
         Ok(text_json(&json!({
@@ -2450,6 +2699,17 @@ fn opt_bool(a: &Value, k: &str) -> Result<Option<bool>> {
         None | Some(Value::Null) => Ok(None),
         Some(v) => v.as_bool().map(Some).ok_or_else(|| anyhow!("`{k}` must be true or false")),
     }
+}
+
+/// `face_box {cx, cy, w, h}` (fractions of the frame), if given.
+fn face_box_arg(a: &Value) -> Result<Option<crate::ai::faces::FaceBox>> {
+    let Some(b) = a.get("face_box").filter(|v| !v.is_null()) else { return Ok(None) };
+    let f = |k: &str| b[k].as_f64().filter(|v| v.is_finite() && (0.0..=1.0).contains(v)).map(|v| v as f32).ok_or_else(|| anyhow!("`face_box.{k}` must be a number from 0 to 1"));
+    let fb = crate::ai::faces::FaceBox { cx: f("cx")?, cy: f("cy")?, w: f("w")?, h: f("h")? };
+    if fb.w < 0.01 || fb.h < 0.01 {
+        bail!("`face_box` is too small");
+    }
+    Ok(Some(fb))
 }
 
 fn req_id(a: &Value, k: &str) -> Result<Id> {
@@ -2943,7 +3203,49 @@ fn tool_definitions() -> Vec<Value> {
             "video_clip_id": int("The character's video clip"),
             "voice_clip_id": int("The dialogue clip (default: the voice clip overlapping the shot most)"),
             "model": { "type": "string", "enum": ["lipsync-2", "lipsync-2-pro"] },
+            "quality": { "type": "string", "enum": ["standard", "high"], "description": "standard = up to 1280 px wide; high = 1080p (close-ups)" },
+            "face_box": { "type": "object", "description": "Only sync this face (from detect_faces): the region is cropped, synced and blended back", "properties": { "cx": { "type": "number" }, "cy": { "type": "number" }, "w": { "type": "number" }, "h": { "type": "number" } }, "required": ["cx", "cy", "w", "h"] },
+            "start": num("Limit to this timeline range: start (seconds)"),
+            "end": num("Limit to this timeline range: end (seconds)"),
+            "place": { "type": "string", "enum": ["replace", "above"], "description": "replace the span (default) or put the result on the track above, keeping the original" },
+            "fill": { "type": "string", "enum": ["none", "loop", "pingpong", "hold"], "description": "When the voice runs past the end of the shot: loop the footage, ping-pong it (no jump at the seam), or hold the last frame. The dry run suggests one." },
+            "dry_run": boolean("Only plan: return the span and the estimated cost"),
         }), &["video_clip_id"], json!({ "readOnlyHint": false, "destructiveHint": false, "openWorldHint": true })),
+        tool("lip_sync_still", "Lip-sync a still (Lip-sync Studio)", "Makes a lip-synced clip from a still of the singer or speaker: places the image and the voice (an audio clip on the timeline, an audio file, or a text-to-speech line, reused if made before) at `start`, then either animates the still with a steady face on OpenRouter (Wan 3.0 by default) and drives the mouth with lipsync-2-pro (animate_sync, the default: works on likenesses Seedance refuses) or makes a Seedance performance shot. Paid: animate_sync ≈ $0.06/s of video + $0.083/s of sync (≈ $1.55 for 10 s); use dry_run first.", json!({
+            "image": string("Path to the still (PNG/JPEG)"),
+            "audio_clip_id": int("The song or line already on the timeline"),
+            "audio_path": string("…or an audio file to place at `start`"),
+            "text": string("…or a line to speak (with `voice`)"),
+            "voice": string("Character or ElevenLabs voice for `text`"),
+            "tts_model": string("ElevenLabs model for `text`"),
+            "start": num("Timeline time to place it (default: the audio clip's start, or 0)"),
+            "end": num("Timeline time the shot ends (required when the audio runs on for more than 15 s, e.g. the whole song)"),
+            "seconds": num("…or the shot's length from `start`"),
+            "method": { "type": "string", "enum": ["animate_sync", "performance"] },
+            "video_model": string("Image-to-video model for animate_sync (default alibaba/wan-3.0; also minimax/hailuo-3-max, kwaivgi/kling-v3.0-std)"),
+            "direction": string("Acting and gestures, added to the steady-face template, e.g. 'her hand rests on her chest on the last line'"),
+            "quality": { "type": "string", "enum": ["standard", "high"] },
+            "performance_model": { "type": "string", "enum": ["fast", "best"] },
+            "character_sheet": string("Optional character sheet for the performance method"),
+            "dry_run": boolean("Only plan: return the span, cost breakdown and warnings"),
+        }), &["image"], json!({ "readOnlyHint": false, "destructiveHint": false, "openWorldHint": true })),
+        tool("detect_faces", "Detect faces (for lip-sync)", "Boxes every face in a few frames of a clip with the OpenRouter vision model (about a cent) and says whether the face is big enough to lip-sync well. Pass one box as lip_sync's face_box to sync only that person.", json!({
+            "clip_id": int("The shot"),
+            "start": num("Timeline range start (default: the clip's start)"),
+            "end": num("Timeline range end (default: the clip's end)"),
+            "model": string("Vision model (default: the AI settings' vision model)"),
+        }), &["clip_id"], json!({ "readOnlyHint": true, "openWorldHint": true })),
+        tool("lipsync_check", "Check a lip-sync", "Measures how well a clip's mouth follows the voice under it (free, local): a sync score (about 0.2+ in sync, under 0.08 out of sync), how early or late the mouth is, a rough mouth-detail flag for smeared or jagged mouths, and a mouth contact sheet PNG to look at. apply_nudge shifts the clip's footage by the measured lag.", json!({
+            "clip_id": int("The lip-synced clip"),
+            "voice_clip_id": int("The voice or song clip (default: the one under the clip)"),
+            "face_box": { "type": "object", "description": "The face (from detect_faces) for an accurate mouth crop", "properties": { "cx": { "type": "number" }, "cy": { "type": "number" }, "w": { "type": "number" }, "h": { "type": "number" } }, "required": ["cx", "cy", "w", "h"] },
+            "sheet": boolean("Write the mouth contact sheet (default true)"),
+            "apply_nudge": boolean("Shift the footage by the measured lag"),
+        }), &["clip_id"], edit.clone()),
+        tool("lipsync_takes", "Lip-sync takes", "Lists the takes a lip-synced clip has had (the original footage first, then each result), or swaps the clip to one of them with use_media_id. Free.", json!({
+            "clip_id": int("The lip-synced clip"),
+            "use_media_id": int("Swap the clip to this take"),
+        }), &["clip_id"], edit.clone()),
         tool("performance_shot", "Performance shot (Seedance 2.0 lip-sync)", "Re-generates a shot of the singer as a performance of the song: a still of the shot plus the matching song audio and lyrics go to Seedance 2.0 on fal.ai in overlapping segments of ≤14 s, and the results replace the shot on the timeline. Best lip-sync method for music videos. Paid: ≈ $0.24/s (fast) or $0.30/s (best) of generated video; use dry_run first to see segments and cost.", json!({
             "clip_id": int("The singer's video or image clip"),
             "audio_clip_id": int("The song/vocal clip (default: the audio overlapping the shot most)"),
@@ -3099,7 +3401,7 @@ mod tests {
         assert!(s.handle_line(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#).is_none());
         let r = call(&mut s, 3, "tools/list", json!({}));
         let tools = r["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 68);
+        assert_eq!(tools.len(), 72);
         assert!(tools.iter().all(|t| t["inputSchema"]["type"] == "object"));
         assert_eq!(call(&mut s, 4, "ping", json!({}))["result"], json!({}));
     }
@@ -3179,6 +3481,73 @@ mod tests {
         let (err, out) = tool_call(&mut s, "add_brand_asset", json!({ "folder": folder, "asset": "intro", "placement": "sideways" }));
         assert!(err && out.contains("placement"), "{out}");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn lipsync_studio_tools() {
+        let mut s = Server::new(Vec::new());
+        let item = |name: &str, kind: MediaKind, d: f64| MediaItem { id: 0, path: name.into(), name: name.into(), kind, duration: d, width: if kind == MediaKind::Audio { 0 } else { 1280 }, height: if kind == MediaKind::Audio { 0 } else { 720 }, fps: 24.0, has_audio: kind == MediaKind::Audio };
+        let v = s.project.add_media(item("shot.mp4", MediaKind::Video, 8.0));
+        let a = s.project.add_media(item("line.mp3", MediaKind::Audio, 3.0));
+        let vc = s.project.new_media_clip(v, 0.0).unwrap();
+        let vid = vc.id;
+        s.project.append_to_main(vc);
+        let mut ac = s.project.new_media_clip(a, 2.0).unwrap();
+        ac.start = 2.0;
+        ac.audio_role = AudioRole::Voice;
+        let aid = ac.id;
+        s.project.place_clip(ac, None);
+
+        // Dry run: span under the line, quality and face, no spending.
+        let (err, out) = tool_call(&mut s, "lip_sync", json!({ "video_clip_id": vid, "dry_run": true, "quality": "high", "model": "lipsync-2-pro", "face_box": { "cx": 0.5, "cy": 0.4, "w": 0.05, "h": 0.06 } }));
+        assert!(!err, "{out}");
+        let r: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(r["voice_clip_id"], aid);
+        assert_eq!(r["quality"], "high");
+        assert!((r["start"].as_f64().unwrap() - 1.85).abs() < 1e-6 && (r["end"].as_f64().unwrap() - 5.15).abs() < 1e-6);
+        assert!(r["face_hint"].is_string(), "a small face is flagged: {out}");
+        let (err, out) = tool_call(&mut s, "lip_sync", json!({ "video_clip_id": vid, "dry_run": true, "start": 3.0 }));
+        assert!(!err && (serde_json::from_str::<Value>(&out).unwrap()["start"].as_f64().unwrap() - 3.0).abs() < 1e-6, "{out}");
+        let (err, out) = tool_call(&mut s, "lip_sync", json!({ "video_clip_id": vid, "dry_run": true, "place": "sideways" }));
+        assert!(err && out.contains("place"), "{out}");
+        let (err, out) = tool_call(&mut s, "lip_sync", json!({ "video_clip_id": vid, "dry_run": true, "face_box": { "cx": 2.0, "cy": 0.4, "w": 0.1, "h": 0.1 } }));
+        assert!(err && out.contains("face_box"), "{out}");
+
+        // Takes: none yet, then two after recording.
+        let (err, out) = tool_call(&mut s, "lipsync_takes", json!({ "clip_id": vid }));
+        assert!(!err && serde_json::from_str::<Value>(&out).unwrap()["takes"].as_array().unwrap().is_empty(), "{out}");
+        let synced = s.project.add_media(item("lipsync-shot.mp4", MediaKind::Video, 8.0));
+        s.project.record_take(vid, vid, Some(v), synced);
+        let (err, out) = tool_call(&mut s, "lipsync_takes", json!({ "clip_id": vid, "use_media_id": synced }));
+        assert!(!err, "{out}");
+        let r: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(r["takes"].as_array().unwrap().len(), 2);
+        assert_eq!(r["takes"][1]["current"], true);
+        let (err, out) = tool_call(&mut s, "lipsync_takes", json!({ "clip_id": vid, "use_media_id": 9999 }));
+        assert!(err && out.contains("not a take"), "{out}");
+
+        // A still over the line: Animate + sync estimate, project unchanged by a dry run.
+        let dir = std::env::temp_dir().join(format!("rustcut-mcp-still-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let still = dir.join("singer.png");
+        let made = ffmpeg::command(&ffmpeg::ffmpeg_bin())
+            .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=c=gray:s=640x360:d=0.1", "-frames:v", "1"])
+            .arg(&still)
+            .status()
+            .is_ok_and(|st| st.success());
+        if made {
+            let before = s.project.clone();
+            let (err, out) = tool_call(&mut s, "lip_sync_still", json!({ "image": still.to_string_lossy(), "audio_clip_id": aid, "dry_run": true }));
+            assert!(!err, "{out}");
+            let r: Value = serde_json::from_str(&out).unwrap();
+            assert_eq!(r["method"], "AnimateSync");
+            assert_eq!(r["parts"].as_array().unwrap().len(), 2);
+            assert!(r["estimated_usd"].as_f64().unwrap() > 0.0);
+            assert_eq!(s.project, before, "a dry run changes nothing");
+            let (err, out) = tool_call(&mut s, "lip_sync_still", json!({ "image": still.to_string_lossy(), "audio_clip_id": aid, "method": "fix_mouth", "dry_run": true }));
+            assert!(err && out.contains("method"), "{out}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -17,6 +17,22 @@ description: Make characters in a RustCut timeline lip-sync to a song or dialogu
 |---|---|---|---|
 | **Performance shot** (Seedance 2.0 via fal.ai) | `performance_shot` | Singing. Re-generates the shot from a still with the song audio and lyrics | Fast ≈ $0.24/s, best ≈ $0.30/s, of generated video |
 | **Fix the mouth** (Sync lipsync-2) | `lip_sync` | Dialogue over existing footage | ≈ $0.05/s (pro ≈ $0.083/s) |
+| **Animate + sync** (Wan/Hailuo/Kling, then lipsync-2-pro) | `lip_sync_still` | A still of the singer; likenesses Seedance refuses; a calm, clean mouth | ≈ $0.06/s of video + $0.083/s of sync (≈ $1.66 for 10.6 s) |
+
+**When Seedance refuses** (`performance_shot` now returns `{refused: true, charged: false}` instead of an error), switch to `lip_sync_still {method: "animate_sync"}`. It uses a steady-face prompt (soft lips, no tears, face to camera, push-in that stops at chest height): on Bond Money's choir redo, a wide-open crying mouth from a big emotional prompt came out with jagged teeth after lipsync-2; this template plus the pro model was clean.
+
+## Lip-sync Studio tools (the MCP server built after 2026-11-18)
+- **`lip_sync`** now takes `quality: "high"` (1080p; for close-ups), `start`/`end` (trim to one or two lyric lines), `place: "above"` (keep the original underneath), `face_box` (sync only that person), and `dry_run: true` (span + estimate, free).
+- **`detect_faces {clip_id}`** (≈ $0.01): every face per frame, plus a size warning. Pass one box as `face_box` when two people are in the shot; the face is cropped, synced and blended back.
+- **`lip_sync_still {image, audio_clip_id | audio_path | text + voice, start, end | seconds, method, video_model?, direction?, dry_run}`**: the whole flow from a still. A `text` line is reused if it was made before (no second charge). Give `end` when the audio is the whole song.
+- **`lipsync_takes {clip_id, use_media_id?}`**: every lip-sync records the original and each result as takes; swap back without undo.
+- Always dry-run first and quote `estimated_usd` and its `parts`.
+
+## Phase 2 (the MCP server built after 2026-11-18, branch lipsync-studio-phase2)
+- **Any speed:** clips at 0.888× (a beat fix) or 2× sync without resetting the speed; the span is rendered at its timeline speed and the result placed at 1×.
+- **Stills:** `lip_sync` on an image clip is a cheap talking photo (lipsync-2 on the held still, ≈ $0.05/s). The mouth moves but nothing else does; for a living scene use `lip_sync_still` (Animate + sync).
+- **Voice longer than the shot:** the dry run returns `voice_past_shot {seconds, seam, suggested_fill}` and `next_shot_in_the_way`. Pass `fill: "loop" | "pingpong" | "hold"` (ping-pong when the seam is over 0.08, so a loop wouldn't jump) and `place: "above"` when the next shot is in the way. Loops suit swaying or waves, not walking.
+- **`lipsync_check {clip_id, face_box, voice_clip_id?}`** (free): a rough sync score (Bond Money choir: clean pro take 0.21, unsynced take 0.18, the rejected jagged take 0.14), the mouth's lag, and a mouth contact sheet PNG. **The sheet is the real check**: open it and look for jagged teeth, smeared "oh" shapes and tears. Without `face_box` the numbers are noise (`reliable: false`) and `apply_nudge` refuses. A push-in moves the face out of a fixed box in later frames.
 
 **Choose good shots:** close-ups and medium shots facing the camera, where the singer is clearly the subject. On a wide shot the face is small, so the sync barely reads (seen on Bond Money shot 16). In storyboards, prefer shots described as close-ups or performance shots.
 
@@ -47,4 +63,9 @@ The project must be closed in RustCut, or the user must reload it afterwards wit
 - Report the cost. Runs are recorded in the cost report as "lipsync".
 
 ## In the app
-For the user doing it by hand: right-click a clip → **👄 Lip-sync to dialogue (AI)…** → choose **Method** (Performance shot / Fix the mouth) → check the segments and cost → click the button.
+For the user doing it by hand: right-click a clip → **👄 Lip-sync Studio…** (or AI → 👄 Lip-sync Studio…):
+1. **Shot & face:** the clip, or bring in a video file or a still; **Detect faces** or **Mark face manually**.
+2. **Voice:** a clip on the timeline (with a lyric-line range), an audio file, or text to speech (a line made before is reused free).
+3. **Generate:** the recommended method is starred; choose quality, Replace or On the track above, see the cost breakdown, then Generate. Afterwards, the **Takes** list swaps between the original and each result.
+
+The mini timeline shows the shot, the chosen face and the waveform with lyrics; drag the gold handles to trim the span. The older **👄 Lip-sync to dialogue (AI)…** item still works.
