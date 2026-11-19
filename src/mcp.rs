@@ -181,6 +181,7 @@ impl<W: Write> Server<W> {
             "lip_sync_still" => self.lip_sync_still(a, progress.clone()),
             "detect_faces" => self.detect_faces(a),
             "lipsync_takes" => self.lipsync_takes(a),
+            "lipsync_check" => self.lipsync_check(a),
             "performance_shot" => self.performance_shot(a, progress),
             "reference_shot" => self.reference_shot(a, progress),
             "reshoot_clip" => self.reshoot_clip(a, progress),
@@ -2040,7 +2041,11 @@ impl<W: Write> Server<W> {
             (None, None) => None,
             (s, e) => Some((s.unwrap_or(0.0), e.unwrap_or(f64::MAX))),
         };
-        let mut plan = lipsync::plan_span(&self.project, video, voice, span)?;
+        let fill = match opt_str(a, "fill")? {
+            Some(f) => lipsync::Fill::parse(f).ok_or_else(|| anyhow!("`fill` must be none, loop, pingpong or hold"))?,
+            None => lipsync::Fill::None,
+        };
+        let mut plan = lipsync::plan_fill(&self.project, video, voice, span, fill)?;
         plan.face = face_box_arg(a)?;
         plan.quality = quality;
         let secs = plan.end - plan.start;
@@ -2051,6 +2056,9 @@ impl<W: Write> Server<W> {
                 "model": model, "quality": format!("{quality:?}").to_lowercase(), "estimated_usd": estimate,
                 "face_box": plan.face.map(|f| json!({ "cx": f.cx, "cy": f.cy, "w": f.w, "h": f.h })),
                 "face_hint": plan.face.and_then(|f| crate::ai::faces::size_hint(f.h)),
+                "fill": format!("{:?}", plan.fill).to_lowercase(),
+                "next_shot_in_the_way": self.project.clip(video).and_then(|v| self.project.locate(video).map(|(ti, _)| plan.end > v.end() + 1e-3 && !self.project.fits(ti, v.end(), plan.end, Some(video)))).unwrap_or(false),
+                "voice_past_shot": self.voice_past_shot(&plan),
             })));
         }
         let key = key?;
@@ -2199,6 +2207,45 @@ impl<W: Write> Server<W> {
             "frames": found.frames.iter().map(|f| json!({ "t": round3(f.t), "faces": f.faces.iter().map(|b| json!({ "cx": b.cx, "cy": b.cy, "w": b.w, "h": b.h })).collect::<Vec<_>>() })).collect::<Vec<_>>(),
             "face_hint": faces::size_hint(biggest), "recommend_pro": faces::recommend_pro(biggest),
             "hint": "Pass one box as lip_sync's face_box to sync only that face.",
+        })))
+    }
+
+    /// When the voice runs past the shot (without a fill), how much, and which fill suits
+    /// the footage (a ping-pong when the first and last frames differ).
+    fn voice_past_shot(&self, plan: &crate::ai::lipsync::Plan) -> Value {
+        use crate::ai::lipsync;
+        let (Some(v), Some(a)) = (self.project.clip(plan.video_clip), self.project.clip(plan.voice_clip)) else { return Value::Null };
+        let past = a.end() + 0.15 - v.end();
+        if past < 0.2 || plan.fill != lipsync::Fill::None && plan.end > v.end() {
+            return Value::Null;
+        }
+        let Some(m) = v.media_id().and_then(|m| self.project.media(m)) else { return Value::Null };
+        let seam = if m.kind == MediaKind::Image { 0.0 } else { lipsync::loop_seam(&m.path, v.source_in + (plan.start - v.start) * v.speed, v.source_in + v.duration * v.speed).unwrap_or(1.0) };
+        json!({ "seconds": round3(past), "seam": (seam * 1000.0).round() / 1000.0, "suggested_fill": format!("{:?}", lipsync::suggest_fill(seam)).to_lowercase(),
+                "hint": "The voice runs past the end of the shot: pass fill (loop, pingpong or hold) to cover it." })
+    }
+
+    /// Measures a lip-synced clip: sync score and lag, mouth detail, contact sheet.
+    fn lipsync_check(&mut self, a: &Value) -> Result<Vec<Value>> {
+        use crate::ai::lipsync_check as chk;
+        let clip = req_id(a, "clip_id")?;
+        let voice = a.get("voice_clip_id").and_then(Value::as_u64);
+        let face = face_box_arg(a)?;
+        let dir = crate::ai::video_gen::output_dir(self.path.as_deref()).join("lipsync").join("checks");
+        let sheet = opt_bool(a, "sheet")?.unwrap_or(true);
+        let c = chk::check_clip(&self.project, clip, voice, face, sheet.then_some(dir.as_path()))?;
+        let mut nudged = Value::Null;
+        if opt_bool(a, "apply_nudge")?.unwrap_or(false) && !c.reliable {
+            bail!("pass face_box (from detect_faces) before apply_nudge: without it the measured lag is noise");
+        }
+        if opt_bool(a, "apply_nudge")?.unwrap_or(false) && c.verdict != chk::Verdict::Unclear && c.lag.abs() >= 0.05 {
+            nudged = json!(chk::nudge(&mut self.project, clip, c.lag)?);
+        }
+        Ok(text_json(&json!({
+            "clip_id": clip, "verdict": c.verdict.label(), "score": (c.score * 1000.0).round() / 1000.0,
+            "lag_seconds": round3(c.lag), "mouth_detail": (c.mouth_detail * 100.0).round() / 100.0,
+            "notes": c.notes, "contact_sheet": c.sheet, "nudged": nudged, "reliable": c.reliable,
+            "scale": "score: about 0.2+ in sync, under 0.08 out of sync; lag > 0 = the mouth is late",
         })))
     }
 
@@ -3161,6 +3208,7 @@ fn tool_definitions() -> Vec<Value> {
             "start": num("Limit to this timeline range: start (seconds)"),
             "end": num("Limit to this timeline range: end (seconds)"),
             "place": { "type": "string", "enum": ["replace", "above"], "description": "replace the span (default) or put the result on the track above, keeping the original" },
+            "fill": { "type": "string", "enum": ["none", "loop", "pingpong", "hold"], "description": "When the voice runs past the end of the shot: loop the footage, ping-pong it (no jump at the seam), or hold the last frame. The dry run suggests one." },
             "dry_run": boolean("Only plan: return the span and the estimated cost"),
         }), &["video_clip_id"], json!({ "readOnlyHint": false, "destructiveHint": false, "openWorldHint": true })),
         tool("lip_sync_still", "Lip-sync a still (Lip-sync Studio)", "Makes a lip-synced clip from a still of the singer or speaker: places the image and the voice (an audio clip on the timeline, an audio file, or a text-to-speech line, reused if made before) at `start`, then either animates the still with a steady face on OpenRouter (Wan 3.0 by default) and drives the mouth with lipsync-2-pro (animate_sync, the default: works on likenesses Seedance refuses) or makes a Seedance performance shot. Paid: animate_sync ≈ $0.06/s of video + $0.083/s of sync (≈ $1.55 for 10 s); use dry_run first.", json!({
@@ -3187,6 +3235,13 @@ fn tool_definitions() -> Vec<Value> {
             "end": num("Timeline range end (default: the clip's end)"),
             "model": string("Vision model (default: the AI settings' vision model)"),
         }), &["clip_id"], json!({ "readOnlyHint": true, "openWorldHint": true })),
+        tool("lipsync_check", "Check a lip-sync", "Measures how well a clip's mouth follows the voice under it (free, local): a sync score (about 0.2+ in sync, under 0.08 out of sync), how early or late the mouth is, a rough mouth-detail flag for smeared or jagged mouths, and a mouth contact sheet PNG to look at. apply_nudge shifts the clip's footage by the measured lag.", json!({
+            "clip_id": int("The lip-synced clip"),
+            "voice_clip_id": int("The voice or song clip (default: the one under the clip)"),
+            "face_box": { "type": "object", "description": "The face (from detect_faces) for an accurate mouth crop", "properties": { "cx": { "type": "number" }, "cy": { "type": "number" }, "w": { "type": "number" }, "h": { "type": "number" } }, "required": ["cx", "cy", "w", "h"] },
+            "sheet": boolean("Write the mouth contact sheet (default true)"),
+            "apply_nudge": boolean("Shift the footage by the measured lag"),
+        }), &["clip_id"], edit.clone()),
         tool("lipsync_takes", "Lip-sync takes", "Lists the takes a lip-synced clip has had (the original footage first, then each result), or swaps the clip to one of them with use_media_id. Free.", json!({
             "clip_id": int("The lip-synced clip"),
             "use_media_id": int("Swap the clip to this take"),
@@ -3346,7 +3401,7 @@ mod tests {
         assert!(s.handle_line(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#).is_none());
         let r = call(&mut s, 3, "tools/list", json!({}));
         let tools = r["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 71);
+        assert_eq!(tools.len(), 72);
         assert!(tools.iter().all(|t| t["inputSchema"]["type"] == "object"));
         assert_eq!(call(&mut s, 4, "ping", json!({}))["result"], json!({}));
     }

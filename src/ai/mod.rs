@@ -7,6 +7,7 @@ pub mod faces;
 pub mod highlights;
 pub mod image_gen;
 pub mod lipsync;
+pub mod lipsync_check;
 pub mod lipsync_studio;
 pub mod listen;
 pub mod local;

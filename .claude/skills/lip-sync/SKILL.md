@@ -28,6 +28,12 @@ description: Make characters in a RustCut timeline lip-sync to a song or dialogu
 - **`lipsync_takes {clip_id, use_media_id?}`**: every lip-sync records the original and each result as takes; swap back without undo.
 - Always dry-run first and quote `estimated_usd` and its `parts`.
 
+## Phase 2 (the MCP server built after 2026-11-18, branch lipsync-studio-phase2)
+- **Any speed:** clips at 0.888× (a beat fix) or 2× sync without resetting the speed; the span is rendered at its timeline speed and the result placed at 1×.
+- **Stills:** `lip_sync` on an image clip is a cheap talking photo (lipsync-2 on the held still, ≈ $0.05/s). The mouth moves but nothing else does; for a living scene use `lip_sync_still` (Animate + sync).
+- **Voice longer than the shot:** the dry run returns `voice_past_shot {seconds, seam, suggested_fill}` and `next_shot_in_the_way`. Pass `fill: "loop" | "pingpong" | "hold"` (ping-pong when the seam is over 0.08, so a loop wouldn't jump) and `place: "above"` when the next shot is in the way. Loops suit swaying or waves, not walking.
+- **`lipsync_check {clip_id, face_box, voice_clip_id?}`** (free): a rough sync score (Bond Money choir: clean pro take 0.21, unsynced take 0.18, the rejected jagged take 0.14), the mouth's lag, and a mouth contact sheet PNG. **The sheet is the real check**: open it and look for jagged teeth, smeared "oh" shapes and tears. Without `face_box` the numbers are noise (`reliable: false`) and `apply_nudge` refuses. A push-in moves the face out of a fixed box in later frames.
+
 **Choose good shots:** close-ups and medium shots facing the camera, where the singer is clearly the subject. On a wide shot the face is small, so the sync barely reads (seen on Bond Money shot 16). In storyboards, prefer shots described as close-ups or performance shots.
 
 ## Performance shot (the "method 1" workflow)

@@ -4,7 +4,8 @@
 //! method and a cost estimate before anything is spent. See `crate::ai::lipsync_studio`.
 
 use crate::ai::faces::{self, FaceBox, Faces};
-use crate::ai::lipsync::{self, Placement, Quality};
+use crate::ai::lipsync::{self, Fill, Placement, Quality};
+use crate::ai::lipsync_check::{self as chk, Check};
 use crate::ai::lipsync_studio::{self as st, Method, Outcome, Request, Source};
 use crate::app::EditorApp;
 use crate::media::ffmpeg;
@@ -68,6 +69,13 @@ pub struct LipSyncStudioUi {
     refused: Option<String>,
     result: Option<Id>,
     handle_drag: Option<bool>,
+    /// How a voice longer than the shot is covered.
+    fill: Fill,
+    /// (shot, seam difference) for the fill suggestion.
+    seam: Option<(Id, f32)>,
+    check_job: Option<Task<Check>>,
+    check: Option<(Id, Check)>,
+    sheet_tex: Option<TextureHandle>,
 }
 
 impl LipSyncStudioUi {
@@ -195,6 +203,9 @@ pub fn poll(app: &mut EditorApp, ctx: &Context) {
                     s.result = first;
                     s.video_clip = first.or(s.video_clip);
                     s.frames_key = None;
+                    s.fill = Fill::None;
+                    s.check = None;
+                    s.sheet_tex = None;
                     app.notify(format!("👄 Lip-synced — {} clip(s) placed. Press Preview, or swap takes in the Studio.", ids.len()));
                 }
                 Err(e) => app.notify_error(format!("Lip-sync: {e:#}")),
@@ -244,8 +255,19 @@ fn ensure_peaks(app: &mut EditorApp, ctx: &Context) {
 fn overlap(app: &EditorApp) -> Option<(f64, f64)> {
     let v = app.project.clip(app.lipsync_studio.video_clip?)?;
     let a = app.project.clip(app.lipsync_studio.voice_clip?)?;
-    let (s, e) = (v.start.max(a.start), v.end().min(a.end()));
-    (e - s > 0.2).then_some((s, e))
+    // With a fill, the span can run on past the shot to the end of the voice.
+    let end = if app.lipsync_studio.fill != Fill::None { a.end() } else { v.end().min(a.end()) };
+    let (s, e) = (v.start.max(a.start), end);
+    (e - s > 0.2 && s < v.end()).then_some((s, e))
+}
+
+/// Seconds the voice runs past the end of the shot (0 if it doesn't).
+fn voice_past_shot(app: &EditorApp) -> f64 {
+    let s = &app.lipsync_studio;
+    match (s.video_clip.and_then(|id| app.project.clip(id)), s.voice_clip.and_then(|id| app.project.clip(id))) {
+        (Some(v), Some(a)) => (a.end() - v.end()).max(0.0),
+        _ => 0.0,
+    }
 }
 
 fn request(app: &EditorApp) -> Option<Request> {
@@ -264,6 +286,7 @@ fn request(app: &EditorApp) -> Option<Request> {
     r.lipsync_model = if s.lipsync_pro { lipsync::MODELS[1].0.into() } else { lipsync::MODELS[0].0.into() };
     r.performance_model = crate::ai::performance::MODELS[if s.perf_best { 1 } else { 0 }].0.into();
     r.sheet = s.sheet.clone();
+    r.fill = s.fill;
     Some(r)
 }
 
@@ -787,6 +810,7 @@ fn step_generate(ui: &mut egui::Ui, app: &mut EditorApp) {
     match req.method {
         Method::FixMouth => {
             ui.checkbox(&mut s.lipsync_pro, "Pro model (sharper teeth and lips, ≈ $0.083/s)");
+            fill_choice(ui, app);
         }
         Method::Performance => {
             ui.checkbox(&mut s.perf_best, "Best quality (≈ $0.30/s instead of $0.24/s)");
@@ -870,6 +894,7 @@ fn step_generate(ui: &mut egui::Ui, app: &mut EditorApp) {
         }
     }
     takes(ui, app);
+    check_panel(ui, app);
 }
 
 fn start_run(app: &mut EditorApp, ctx: &Context, req: Request) {
@@ -918,6 +943,126 @@ fn takes(ui: &mut egui::Ui, app: &mut EditorApp) {
                 app.seek(t);
                 app.play();
             }
+        }
+    });
+}
+
+/// When the voice runs past the shot: cover it by looping, ping-ponging or holding the
+/// footage, with the seam check's suggestion.
+fn fill_choice(ui: &mut egui::Ui, app: &mut EditorApp) {
+    let past = voice_past_shot(app);
+    if past < 0.2 {
+        return;
+    }
+    let Some(v) = app.lipsync_studio.video_clip.and_then(|id| app.project.clip(id)).cloned() else { return };
+    if app.lipsync_studio.seam.is_none_or(|(id, _)| id != v.id) {
+        let seam = v.media_id().and_then(|m| app.project.media(m)).map(|m| {
+            if m.kind == MediaKind::Image {
+                0.0
+            } else {
+                lipsync::loop_seam(&m.path, v.source_in, v.source_in + v.duration * v.speed).unwrap_or(1.0)
+            }
+        });
+        app.lipsync_studio.seam = seam.map(|s| (v.id, s));
+    }
+    let suggested = app.lipsync_studio.seam.map(|(_, s)| lipsync::suggest_fill(s));
+    ui.label(RichText::new(format!("The voice runs {past:.1} s past the end of the shot.")).small());
+    ui.horizontal_wrapped(|ui| {
+        let s = &mut app.lipsync_studio;
+        for f in Fill::ALL {
+            let label = if Some(f) == suggested { format!("{}  ★", f.label()) } else { f.label().to_string() };
+            if ui.radio(s.fill == f, label).clicked() {
+                s.fill = f;
+                s.span = None;
+            }
+        }
+    });
+    if app.lipsync_studio.fill == Fill::Loop && suggested == Some(Fill::PingPong) {
+        ui.label(RichText::new("⚠ The shot's first and last frames differ a lot: a loop will visibly jump. Ping-pong hides the seam.").color(theme::DANGER).small());
+    }
+    if app.lipsync_studio.fill != Fill::None && app.lipsync_studio.placement == Placement::Replace {
+        let room = app.project.locate(v.id).is_some_and(|(ti, _)| app.project.fits(ti, v.end(), v.end() + past + 0.15, Some(v.id)));
+        if !room {
+            ui.label(RichText::new("⚠ The next shot is in the way: choose \"On the track above\".").color(theme::DANGER).small());
+        }
+    }
+}
+
+/// After a result: measure the sync, show the mouth contact sheet, and offer fixes.
+fn check_panel(ui: &mut egui::Ui, app: &mut EditorApp) {
+    let Some(id) = app.lipsync_studio.result.filter(|id| app.project.clip(*id).is_some()) else { return };
+    let ctx = ui.ctx().clone();
+    if let Some(state) = app.lipsync_studio.check_job.as_ref().and_then(Task::take_finished) {
+        app.lipsync_studio.check_job = None;
+        match state {
+            TaskState::Done(c) => {
+                app.lipsync_studio.sheet_tex = c.sheet.as_ref().and_then(|p| {
+                    let info = ffmpeg::probe(p).ok()?;
+                    let (w, h) = ffmpeg::fit_within(info.width, info.height, 1100, 400);
+                    ffmpeg::extract_frame(p, 0.0, w, h).ok().map(|px| texture(&ctx, "ls-mouth-sheet".into(), w, h, &px))
+                });
+                app.lipsync_studio.check = Some((id, c));
+            }
+            TaskState::Failed(e) => app.notify_error(format!("Lip-sync check: {e}")),
+            _ => {}
+        }
+    }
+    ui.separator();
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Check").strong());
+        if app.lipsync_studio.check_job.is_some() {
+            ui.spinner();
+            ui.label(widgets::dim("Measuring the mouth against the voice…"));
+        } else if ui.button("🔍 Check the lip-sync (free)").on_hover_text("Scores how well the mouth follows the voice, flags a smeared or jagged mouth, and shows the mouth frames").clicked() {
+            let project = app.project.clone();
+            let voice = app.lipsync_studio.voice_clip;
+            let face = app.lipsync_studio.face;
+            let dir = crate::ai::video_gen::output_dir(app.project_path.as_deref()).join("lipsync").join("checks");
+            app.lipsync_studio.check_job = Some(Task::spawn(ctx.clone(), move |_, report| {
+                report(0.3, "Measuring…");
+                Ok(Some(chk::check_clip(&project, id, voice, face, Some(&dir))?))
+            }));
+        }
+    });
+    let Some((cid, c)) = app.lipsync_studio.check.clone() else { return };
+    if cid != id {
+        return;
+    }
+    let color = match c.verdict {
+        chk::Verdict::Good => theme::ACCENT,
+        chk::Verdict::OutOfSync => theme::DANGER,
+        _ => Color32::from_gray(200),
+    };
+    let label = if c.reliable { format!("{} (rough) — score {:.2}, mouth {:+.2} s", c.verdict.label(), c.score, c.lag) } else { "No face box, so no score: look at the mouth frames below".to_string() };
+    ui.label(RichText::new(label).color(if c.reliable { color } else { Color32::from_gray(200) }));
+    for n in &c.notes {
+        ui.label(widgets::dim(format!("• {n}")).small());
+    }
+    if let Some(tex) = &app.lipsync_studio.sheet_tex {
+        let size = tex.size_vec2();
+        let w = ui.available_width().min(size.x);
+        ui.add(egui::Image::new((tex.id(), vec2(w, w * size.y / size.x))));
+    }
+    ui.horizontal(|ui| {
+        if c.reliable && c.lag.abs() >= 0.05 && c.verdict != chk::Verdict::Unclear && ui.button(format!("⇆ Nudge {:+.2} s", c.lag)).clicked() {
+            match chk::nudge(&mut app.project, id, c.lag) {
+                Ok(what) => {
+                    app.notify(format!("Nudged: {what}"));
+                    app.lipsync_studio.check = None;
+                }
+                Err(e) => app.notify_error(format!("{e:#}")),
+            }
+        }
+        let list = app.project.takes_for(id);
+        if list.len() >= 2 && ui.button("↻ Redo from the original with Pro").on_hover_text("Swap back to the original footage and lip-sync it again with lipsync-2-pro").clicked() && app.project.use_take(id, list[0]) {
+            let s = &mut app.lipsync_studio;
+            s.method = Some(Method::FixMouth);
+            s.lipsync_pro = true;
+            s.check = None;
+            s.sheet_tex = None;
+            s.video_clip = Some(id);
+            s.frames_key = None;
+            app.notify("Back on the original footage with the pro model selected: press Generate to redo it.");
         }
     });
 }

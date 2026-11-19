@@ -90,6 +90,8 @@ pub struct Plan {
     /// the region is cropped, synced and composited back. `None` = the model picks the face.
     pub face: Option<FaceBox>,
     pub quality: Quality,
+    /// How footage is stretched when `end` is past the end of the shot.
+    pub fill: Fill,
 }
 
 /// The voice clip that overlaps `video_clip` the most (Voice role first, then any audio).
@@ -118,6 +120,12 @@ pub fn plan(project: &Project, video_clip: Id, voice_clip: Option<Id>) -> Result
 
 /// Like [`plan`], limited to the timeline range `span` (a range trimmed in the Studio).
 pub fn plan_span(project: &Project, video_clip: Id, voice_clip: Option<Id>, span: Option<(f64, f64)>) -> Result<Plan> {
+    plan_fill(project, video_clip, voice_clip, span, Fill::None)
+}
+
+/// Like [`plan_span`]; with a [`Fill`] other than `None`, a voice that runs past the end
+/// of the shot is covered too (the footage is looped, ping-ponged or held to its length).
+pub fn plan_fill(project: &Project, video_clip: Id, voice_clip: Option<Id>, span: Option<(f64, f64)>, fill: Fill) -> Result<Plan> {
     let v = project.clip(video_clip).ok_or_else(|| anyhow!("no clip {video_clip}"))?;
     if project.track_kind_for(v) != TrackKind::Video || v.media_id().and_then(|m| project.media(m)).is_none_or(|m| !m.has_video()) {
         bail!("pick a video clip of the character");
@@ -128,7 +136,8 @@ pub fn plan_span(project: &Project, video_clip: Id, voice_clip: Option<Id>, span
     };
     let voice = project.clip(voice_id).ok_or_else(|| anyhow!("no voice clip {voice_id}"))?;
     let mut start = (voice.start - PAD).max(v.start);
-    let mut end = (voice.end() + PAD).min(v.end());
+    let reach = if fill == Fill::None { v.end() } else { f64::MAX };
+    let mut end = (voice.end() + PAD).min(reach);
     if let Some((a, b)) = span {
         start = start.max(a);
         end = end.min(b);
@@ -138,16 +147,73 @@ pub fn plan_span(project: &Project, video_clip: Id, voice_clip: Option<Id>, span
     if start - v.start < margin {
         start = v.start;
     }
-    if v.end() - end < margin {
+    if end <= v.end() && v.end() - end < margin {
         end = v.end();
     }
-    if end - start < 0.5 {
+    if end - start < 0.5 || start >= v.end() {
         bail!("the dialogue doesn't overlap this shot");
     }
-    if (v.speed - 1.0).abs() > 1e-3 {
-        bail!("set this clip's speed to 1× before lip-syncing");
+    let fill = if end > v.end() + 1e-3 { fill } else { Fill::None };
+    Ok(Plan { video_clip, voice_clip: voice_id, start, end, face: None, quality: Quality::Standard, fill })
+}
+
+/// How footage shorter than the voice is stretched to cover it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Fill {
+    /// Only the part of the voice over the shot is synced.
+    #[default]
+    None,
+    /// Play the footage again from the start (best for cyclical motion: swaying, waves).
+    Loop,
+    /// Forward, then backward, then forward…: no jump at the seam.
+    PingPong,
+    /// Freeze the last frame.
+    Hold,
+}
+
+impl Fill {
+    pub const ALL: [Fill; 4] = [Fill::None, Fill::Loop, Fill::PingPong, Fill::Hold];
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().replace(['-', '_', ' '], "").as_str() {
+            "none" | "off" => Some(Fill::None),
+            "loop" => Some(Fill::Loop),
+            "pingpong" | "bounce" => Some(Fill::PingPong),
+            "hold" | "freeze" => Some(Fill::Hold),
+            _ => None,
+        }
     }
-    Ok(Plan { video_clip, voice_clip: voice_id, start, end, face: None, quality: Quality::Standard })
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Fill::None => "Only over the shot",
+            Fill::Loop => "Loop the shot",
+            Fill::PingPong => "Ping-pong (forward, then back)",
+            Fill::Hold => "Hold the last frame",
+        }
+    }
+}
+
+/// How different the first and last frames of `[a, b]` (source seconds) of `path` are,
+/// 0 (identical) to 1. Above [`SEAM_JUMP`] a plain loop visibly jumps at the seam.
+pub fn loop_seam(path: &Path, a: f64, b: f64) -> Result<f32> {
+    let (w, h) = (64, 36);
+    let f0 = ffmpeg::extract_frame(path, a.max(0.0), w, h)?;
+    let f1 = ffmpeg::extract_frame(path, (b - 0.05).max(0.0), w, h)?;
+    let diff: u64 = f0.iter().zip(&f1).enumerate().filter(|(i, _)| i % 4 != 3).map(|(_, (x, y))| (*x as i32 - *y as i32).unsigned_abs() as u64).sum();
+    Ok(diff as f32 / (w * h * 3) as f32 / 255.0)
+}
+
+/// The seam difference above which a plain loop jumps visibly.
+pub const SEAM_JUMP: f32 = 0.08;
+
+/// The fill to suggest for a shot whose seam differs by `seam`.
+pub fn suggest_fill(seam: f32) -> Fill {
+    if seam > SEAM_JUMP {
+        Fill::PingPong
+    } else {
+        Fill::Loop
+    }
 }
 
 /// The pixel rectangle `(x, y, w, h)` cropped around `face` in a `fw`×`fh` frame: the box
@@ -190,7 +256,17 @@ pub fn render_inputs(project: &Project, plan: &Plan, dir: &Path) -> Result<(Path
     let full_out = dir.join(if plan.face.is_some() { "lipsync-full.mp4" } else { "lipsync-in.mp4" });
     let video_out = dir.join("lipsync-in.mp4");
     let audio_out = dir.join("lipsync-in.wav");
-    cut_video(&vm.path, v.source_in + (plan.start - v.start), len, plan.quality, &full_out)?;
+    let offset = v.source_in + (plan.start - v.start) * v.speed;
+    if vm.kind == crate::model::MediaKind::Image {
+        // A talking photo: the still held for the whole span; the model moves the mouth.
+        still_video(&vm.path, len, plan.quality, &full_out)?;
+    } else if plan.fill != Fill::None && plan.end > v.end() + 1e-3 {
+        let footage = dir.join("lipsync-footage.mp4");
+        cut_video_at(&vm.path, offset, (v.end() - plan.start).max(0.1), v.speed, plan.quality, &footage)?;
+        fill_video(&footage, len, plan.fill, &full_out)?;
+    } else {
+        cut_video_at(&vm.path, offset, len, v.speed, plan.quality, &full_out)?;
+    }
     let mut rect = None;
     if let Some(face) = &plan.face {
         let info = ffmpeg::probe(&full_out)?;
@@ -213,10 +289,18 @@ pub fn render_inputs(project: &Project, plan: &Plan, dir: &Path) -> Result<(Path
 
 /// Cuts `len` seconds of `src` from `offset` (no audio), scaled down to the quality's width.
 pub fn cut_video(src: &Path, offset: f64, len: f64, quality: Quality, out: &Path) -> Result<()> {
+    cut_video_at(src, offset, len, 1.0, quality, out)
+}
+
+/// Cuts what plays in `len` timeline seconds of a clip at `speed` (reading `len × speed`
+/// source seconds from `offset`), retimed so the result plays at 1× for `len` seconds.
+pub fn cut_video_at(src: &Path, offset: f64, len: f64, speed: f64, quality: Quality, out: &Path) -> Result<()> {
+    let speed = if speed > 0.01 { speed } else { 1.0 };
+    let retime = if (speed - 1.0).abs() > 1e-3 { format!("setpts=(PTS-STARTPTS)/{speed:.6},fps=30,") } else { String::new() };
     let ok = ffmpeg::command(&ffmpeg::ffmpeg_bin())
-        .args(["-hide_banner", "-loglevel", "error", "-y", "-ss", &format!("{:.3}", offset.max(0.0)), "-t", &format!("{len:.3}"), "-i"])
+        .args(["-hide_banner", "-loglevel", "error", "-y", "-ss", &format!("{:.3}", offset.max(0.0)), "-t", &format!("{:.3}", len * speed), "-i"])
         .arg(src)
-        .args(["-an", "-vf", &format!("scale='min({},iw)':-2", quality.max_width()), "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p"])
+        .args(["-an", "-vf", &format!("{retime}scale='min({},iw)':-2", quality.max_width()), "-t", &format!("{len:.3}"), "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p"])
         .arg(out)
         .status()?
         .success();
@@ -224,6 +308,64 @@ pub fn cut_video(src: &Path, offset: f64, len: f64, quality: Quality, out: &Path
         bail!("could not cut the video segment");
     }
     Ok(())
+}
+
+/// A still held for `len` seconds as video (a talking photo's input).
+pub fn still_video(image: &Path, len: f64, quality: Quality, out: &Path) -> Result<()> {
+    let ok = ffmpeg::command(&ffmpeg::ffmpeg_bin())
+        .args(["-hide_banner", "-loglevel", "error", "-y", "-loop", "1", "-framerate", "30", "-t", &format!("{len:.3}"), "-i"])
+        .arg(image)
+        .args(["-vf", &format!("scale='min({},iw)':-2", quality.max_width()), "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p"])
+        .arg(out)
+        .status()?
+        .success();
+    if !ok {
+        bail!("could not turn the still into video");
+    }
+    Ok(())
+}
+
+/// Stretches `footage` to `len` seconds: looped, ping-ponged (forward then reversed) or
+/// held on its last frame. Footage over 12 s ping-pongs as a plain loop (reversing holds
+/// every frame in memory).
+pub fn fill_video(footage: &Path, len: f64, fill: Fill, out: &Path) -> Result<()> {
+    let have = ffmpeg::probe(footage).map(|i| i.duration).unwrap_or(0.0);
+    let enc = ["-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p"];
+    let run = |cmd: &mut std::process::Command| -> Result<()> {
+        if !cmd.status()?.success() {
+            bail!("could not extend the footage ({fill:?})");
+        }
+        Ok(())
+    };
+    let t = format!("{len:.3}");
+    match fill {
+        Fill::Hold | Fill::None => {
+            let pad = (len - have).max(0.0) + 0.1;
+            run(ffmpeg::command(&ffmpeg::ffmpeg_bin())
+                .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+                .arg(footage)
+                .args(["-vf", &format!("tpad=stop_mode=clone:stop_duration={pad:.3}"), "-t", &t])
+                .args(enc)
+                .arg(out))
+        }
+        Fill::Loop => run(ffmpeg::command(&ffmpeg::ffmpeg_bin())
+            .args(["-hide_banner", "-loglevel", "error", "-y", "-stream_loop", "-1", "-i"])
+            .arg(footage)
+            .args(["-t", &t])
+            .args(enc)
+            .arg(out)),
+        Fill::PingPong if have > 12.0 => fill_video(footage, len, Fill::Loop, out),
+        Fill::PingPong => {
+            let bounce = out.with_file_name("lipsync-bounce.mp4");
+            run(ffmpeg::command(&ffmpeg::ffmpeg_bin())
+                .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+                .arg(footage)
+                .args(["-filter_complex", "[0:v]split[a][b];[b]reverse,trim=start_frame=1[r];[a][r]concat=n=2:v=1[v]", "-map", "[v]"])
+                .args(enc)
+                .arg(&bounce))?;
+            fill_video(&bounce, len, Fill::Loop, out)
+        }
+    }
 }
 
 /// The voice clip's audio for the plan's span, positioned inside it (silence before and
@@ -375,6 +517,9 @@ pub fn apply_with(project: &mut Project, plan: &Plan, result: &Path, info: Probe
     let (ti, _) = project.locate(plan.video_clip).ok_or_else(|| anyhow!("the video clip was removed"))?;
     if placement == Placement::Above {
         return place_above(project, plan, &original, ti, result, info);
+    }
+    if plan.end > original.end() + 1e-3 && !project.fits(ti, original.end(), plan.end, Some(original.id)) {
+        bail!("the next shot is in the way of the extended span ({:.2}–{:.2}): choose \"On the track above\", or move that shot", original.end(), plan.end);
     }
     // Split around the span; the middle piece is what gets replaced.
     let mut middle = plan.video_clip;
@@ -627,11 +772,115 @@ mod tests {
         assert_eq!(takes[0], v, "the original footage is the first take");
     }
 
+    /// A 4 s shot at 0–4 with a voice at 1–7 (longer than the shot), and optionally a next shot.
+    fn long_voice(next_shot: bool) -> (Project, Id, Id) {
+        let mut p = Project::default();
+        let v = p.add_media(MediaItem { id: 0, path: "shot.mp4".into(), name: "shot.mp4".into(), kind: MediaKind::Video, duration: 4.0, width: 1280, height: 720, fps: 24.0, has_audio: false });
+        let a = p.add_media(MediaItem { id: 0, path: "line.mp3".into(), name: "line.mp3".into(), kind: MediaKind::Audio, duration: 6.0, width: 0, height: 0, fps: 0.0, has_audio: true });
+        let vc = p.new_media_clip(v, 0.0).unwrap();
+        let vid = vc.id;
+        p.append_to_main(vc);
+        if next_shot {
+            let nc = p.new_media_clip(v, 4.0).unwrap();
+            p.append_to_main(nc);
+        }
+        let mut ac = p.new_media_clip(a, 1.0).unwrap();
+        ac.start = 1.0;
+        ac.audio_role = AudioRole::Voice;
+        let aid = ac.id;
+        p.place_clip(ac, None);
+        (p, vid, aid)
+    }
+
+    #[test]
+    fn any_speed_is_allowed_now() {
+        let (mut p, vid, _) = project();
+        p.clip_mut(vid).unwrap().speed = 0.888;
+        let v = p.clip(vid).unwrap().clone();
+        // The voice at 12–15 is past this 8 s shot at 0.888× (0–9 s): no overlap error, not a speed error.
+        if let Err(e) = plan(&p, vid, None) {
+            assert!(!e.to_string().contains("speed"), "{e}");
+        }
+        assert!(v.speed < 1.0);
+    }
+
+    #[test]
+    fn fill_covers_a_voice_longer_than_the_shot() {
+        let (p, vid, _) = long_voice(false);
+        let short = plan(&p, vid, None).unwrap();
+        assert_eq!((short.fill, short.end), (Fill::None, 4.0), "without a fill, only the part over the shot");
+        let long = plan_fill(&p, vid, None, None, Fill::PingPong).unwrap();
+        assert_eq!(long.fill, Fill::PingPong);
+        assert!((long.start - 0.85).abs() < 1e-9 && (long.end - 7.15).abs() < 1e-9, "{long:?}");
+        // A fill is dropped when the voice ends inside the shot.
+        let (p2, vid2, _) = project();
+        if let Ok(pl) = plan_fill(&p2, vid2, None, None, Fill::Loop) {
+            assert_eq!(pl.fill, Fill::None);
+        }
+        assert_eq!(Fill::parse("ping-pong"), Some(Fill::PingPong));
+        assert_eq!(suggest_fill(0.2), Fill::PingPong);
+        assert_eq!(suggest_fill(0.01), Fill::Loop);
+    }
+
+    #[test]
+    fn an_extended_span_needs_room_or_the_track_above() {
+        let info = ProbeInfo { kind: MediaKind::Video, duration: 6.3, width: 1280, height: 720, fps: 25.0, has_audio: true };
+        let (mut p, vid, _) = long_voice(true);
+        let pl = plan_fill(&p, vid, None, None, Fill::Loop).unwrap();
+        let err = apply(&mut p, &pl, Path::new("lipsync-long.mp4"), info.clone()).unwrap_err();
+        assert!(err.to_string().contains("in the way"), "{err}");
+        let id = apply_with(&mut p, &pl, Path::new("lipsync-long.mp4"), info.clone(), Placement::Above).unwrap();
+        assert!((p.clip(id).unwrap().duration - 6.3).abs() < 1e-9);
+        // With room after the shot, it replaces and runs on.
+        let (mut p, vid, _) = long_voice(false);
+        let pl = plan_fill(&p, vid, None, None, Fill::Hold).unwrap();
+        let id = apply(&mut p, &pl, Path::new("lipsync-long.mp4"), info).unwrap();
+        let c = p.clip(id).unwrap();
+        assert!((c.start - 0.85).abs() < 1e-9 && (c.end() - 7.15).abs() < 1e-9);
+    }
+
+    #[test]
+    fn fills_and_stills_render_to_length() {
+        let dir = std::env::temp_dir().join(format!("rustcut-fill-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("src.mp4");
+        let made = ffmpeg::command(&ffmpeg::ffmpeg_bin())
+            .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc=s=320x180:d=2:r=24", "-pix_fmt", "yuv420p"])
+            .arg(&src)
+            .status()
+            .is_ok_and(|s| s.success());
+        if !made {
+            eprintln!("ffmpeg not available; skipping");
+            return;
+        }
+        let len = |p: &Path| ffmpeg::probe(p).unwrap().duration;
+        for fill in [Fill::Loop, Fill::PingPong, Fill::Hold] {
+            let out = dir.join(format!("{fill:?}.mp4"));
+            fill_video(&src, 5.0, fill, &out).unwrap();
+            assert!((len(&out) - 5.0).abs() < 0.15, "{fill:?}: {}", len(&out));
+        }
+        // 2 s of timeline at 0.5× reads 1 s of source and plays for 2 s; at 2× it reads 2 s for 1 s.
+        let slow = dir.join("slow.mp4");
+        cut_video_at(&src, 0.0, 2.0, 0.5, Quality::Standard, &slow).unwrap();
+        assert!((len(&slow) - 2.0).abs() < 0.15, "{}", len(&slow));
+        let fast = dir.join("fast.mp4");
+        cut_video_at(&src, 0.0, 1.0, 2.0, Quality::Standard, &fast).unwrap();
+        assert!((len(&fast) - 1.0).abs() < 0.15, "{}", len(&fast));
+        let png = dir.join("still.png");
+        ffmpeg::command(&ffmpeg::ffmpeg_bin()).args(["-hide_banner", "-loglevel", "error", "-y", "-i"]).arg(&src).args(["-frames:v", "1"]).arg(&png).status().unwrap();
+        let talking = dir.join("still.mp4");
+        still_video(&png, 3.0, Quality::Standard, &talking).unwrap();
+        assert!((len(&talking) - 3.0).abs() < 0.15);
+        let seam = loop_seam(&src, 0.0, 2.0).unwrap();
+        assert!(seam > 0.0, "testsrc changes over 2 s");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn above_keeps_the_original_and_lands_on_the_exact_span() {
         let (mut p, vid, _) = project();
         let v = p.clip(vid).unwrap().clone();
-        let mut plan = plan_span(&p, vid, None, None).unwrap_or(Plan { video_clip: vid, voice_clip: 0, start: v.start + 1.0, end: v.start + 3.0, face: None, quality: Quality::High });
+        let mut plan = plan_span(&p, vid, None, None).unwrap_or(Plan { video_clip: vid, voice_clip: 0, start: v.start + 1.0, end: v.start + 3.0, face: None, quality: Quality::High, fill: Fill::None });
         plan.start = v.start + 1.0;
         plan.end = v.start + 3.0;
         let tracks_before = p.tracks.len();

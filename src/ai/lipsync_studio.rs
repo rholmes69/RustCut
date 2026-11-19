@@ -114,6 +114,8 @@ pub struct Request {
     pub lipsync_model: String,
     pub performance_model: String,
     pub sheet: Option<PathBuf>,
+    /// How a voice longer than the shot is covered (Fix the mouth).
+    pub fill: lipsync::Fill,
 }
 
 impl Request {
@@ -131,6 +133,7 @@ impl Request {
             lipsync_model: lipsync::MODELS[0].0.into(),
             performance_model: performance::MODELS[0].0.into(),
             sheet: None,
+            fill: lipsync::Fill::None,
         }
     }
 }
@@ -176,7 +179,7 @@ pub struct Estimate {
 /// The span every method works on: where the shot and the voice overlap (plus the
 /// mouth-settle padding), inside the trimmed range.
 pub fn span(project: &Project, req: &Request) -> Result<(f64, f64)> {
-    let mut p = lipsync::plan_span(project, req.video_clip, Some(req.voice_clip), req.span);
+    let mut p = lipsync::plan_fill(project, req.video_clip, Some(req.voice_clip), req.span, req.fill);
     if let Err(e) = &p {
         // A still (or a sped-up shot) can't be "fixed" but can still be animated or performed.
         if req.method != Method::FixMouth && e.to_string().contains("speed") {
@@ -187,7 +190,7 @@ pub fn span(project: &Project, req: &Request) -> Result<(f64, f64)> {
                 s = s.max(x);
                 e = e.min(y);
             }
-            p = Ok(lipsync::Plan { video_clip: req.video_clip, voice_clip: req.voice_clip, start: s, end: e, face: None, quality: req.quality });
+            p = Ok(lipsync::Plan { video_clip: req.video_clip, voice_clip: req.voice_clip, start: s, end: e, face: None, quality: req.quality, fill: lipsync::Fill::None });
         }
     }
     let p = p?;
@@ -214,7 +217,7 @@ pub fn performance_plan(project: &Project, req: &Request) -> Result<performance:
 }
 
 pub fn fix_plan(project: &Project, req: &Request) -> Result<lipsync::Plan> {
-    let mut plan = lipsync::plan_span(project, req.video_clip, Some(req.voice_clip), req.span)?;
+    let mut plan = lipsync::plan_fill(project, req.video_clip, Some(req.voice_clip), req.span, req.fill)?;
     plan.face = req.face;
     plan.quality = req.quality;
     Ok(plan)
@@ -383,7 +386,7 @@ fn animate_sync(project: &Project, req: &Request, fal_key: &str, client: &crate:
         let offset = if generated.info.duration >= len + ANIMATE_LEAD_IN { ANIMATE_LEAD_IN } else { (generated.info.duration - len).max(0.0) };
         let video = work.join("animated-in.mp4");
         lipsync::cut_video(&generated.path, offset, len.min(generated.info.duration), req.quality, &video)?;
-        let plan = lipsync::Plan { video_clip: req.video_clip, voice_clip: req.voice_clip, start, end, face: None, quality: req.quality };
+        let plan = lipsync::Plan { video_clip: req.video_clip, voice_clip: req.voice_clip, start, end, face: None, quality: req.quality, fill: lipsync::Fill::None };
         let audio = work.join("animated-in.wav");
         lipsync::render_line_audio(project, &plan, &audio)?;
         let out = unique(out_dir, &format!("lipsync-{}", video_gen::slug(&name)));
