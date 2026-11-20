@@ -561,6 +561,53 @@ impl EditorApp {
         }
     }
 
+    /// File → Export project as zip: the project plus all its media in one file.
+    pub fn export_zip_dialog(&mut self) {
+        let Some(dest) = rfd::FileDialog::new()
+            .set_title("Export project as zip")
+            .add_filter("RustCut project zip", &["zip"])
+            .set_file_name(format!("{}.zip", sanitize(&self.project.name)))
+            .save_file()
+        else {
+            return;
+        };
+        match crate::package::export_zip(&self.project, &dest) {
+            Ok(r) if r.missing.is_empty() => self.notify(format!("Exported {} media file(s) to {}", r.files, dest.display())),
+            Ok(r) => self.notify_error(format!(
+                "Exported {} file(s) to {} — {} missing media file(s) left out",
+                r.files,
+                dest.display(),
+                r.missing.len()
+            )),
+            Err(e) => self.notify_error(format!("Zip export failed: {e:#}")),
+        }
+    }
+
+    /// File → Import project zip: unpacks next to a folder you choose, then opens it.
+    pub fn import_zip_dialog(&mut self) {
+        let Some(zip) = rfd::FileDialog::new()
+            .set_title("Import project zip")
+            .add_filter("RustCut project zip", &["zip"])
+            .pick_file()
+        else {
+            return;
+        };
+        let Some(parent) = rfd::FileDialog::new().set_title("Choose a folder to unpack the project into").pick_folder() else {
+            return;
+        };
+        let stem = zip.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "project".into());
+        let mut dest = parent.join(sanitize(&stem));
+        let mut n = 2;
+        while dest.exists() {
+            dest = parent.join(format!("{} ({n})", sanitize(&stem)));
+            n += 1;
+        }
+        match crate::package::import_zip(&zip, &dest) {
+            Ok(path) => self.open_path(&path),
+            Err(e) => self.notify_error(format!("Zip import failed: {e:#}")),
+        }
+    }
+
     pub fn open_export(&mut self) {
         if self.project.duration() <= 0.0 {
             self.notify("Add something to the timeline before exporting");
