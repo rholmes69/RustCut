@@ -16,6 +16,7 @@ pub mod motion_graphics;
 pub mod playback;
 pub mod multicam;
 pub mod music;
+pub mod package;
 pub mod reactive;
 pub mod recent;
 pub mod render;

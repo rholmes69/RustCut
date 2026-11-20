@@ -73,6 +73,14 @@ pub fn show(ctx: &Context, app: &mut EditorApp) {
                         app.save(true);
                         ui.close_menu();
                     }
+                    if ui.button("📦 Export project as zip…").on_hover_text("The project and all its media in one .zip you can move to another computer").clicked() {
+                        app.export_zip_dialog();
+                        ui.close_menu();
+                    }
+                    if ui.button("📥 Import project zip…").on_hover_text("Unpack a RustCut project .zip and open it").clicked() {
+                        app.import_zip_dialog();
+                        ui.close_menu();
+                    }
                     ui.separator();
                     if ui.button("Import media…           Ctrl+I").clicked() {
                         app.import_dialog();
