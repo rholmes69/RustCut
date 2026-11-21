@@ -5,7 +5,7 @@ description: Make a complete AI music video in RustCut from a song, lyrics and a
 
 # Make a music video in RustCut
 
-Proven on "Checklist", "Under The Influence", "Bond Money" and "Last Night" (about $3.70–5.20 each). Last Night's full making-of, including a `theme.txt` to copy, is in `Videos\RustCut AI\Last Night music video\WORKFLOW - making of Last Night.md`.
+Proven on "Checklist", "Under The Influence", "Bond Money" and "Last Night" (about 3.70 USD–5.20 each). Last Night's full making-of, including a `theme.txt` to copy, is in `Videos\RustCut AI\Last Night music video\WORKFLOW - making of Last Night.md`.
 
 ## Rules (always)
 - **Ask before spending money.** Give an estimate first, and stop after the stills so the user can review them before animating.
@@ -18,12 +18,12 @@ Proven on "Checklist", "Under The Influence", "Bond Money" and "Last Night" (abo
 ## Prices (OpenRouter, measured)
 | Step | Cost |
 |---|---|
-| Character sheet (one image) | ≈ $0.07 |
-| Plan (LLM) | ≈ $0.02 |
-| Each still | ≈ $0.067 |
-| Each shot animated (grok-imagine-video lite, ~4 s) | ≈ $0.135 |
+| Character sheet (one image) | ≈ 7¢ |
+| Plan (LLM) | ≈ 2¢ |
+| Each still | ≈ 6.7¢ |
+| Each shot animated (grok-imagine-video lite, ~4 s) | ≈ 13.5¢ |
 
-Estimate = sheets + $0.02 + shots × $0.067, then shots × $0.135 for animation. Default to 22 shots for a ~5-minute song and 16–18 for ~3–4 minutes.
+Estimate = sheets + 2¢ + shots × 6.7¢, then shots × 13.5¢ for animation. Default to 22 shots for a ~5-minute song and 16–18 for ~3–4 minutes.
 
 ## Two ways to run it
 - **MCP tools** (when the `rustcut` MCP server is connected and current): `new_project`, `import_media`, `add_clip`, `detect_beats`, `add_lyrics`, `music_video_plan` (with `cast`), `storyboard_update_shot`, `storyboard_produce`, `export_video`, `save_project`. This is the same path SonicLens Director (`C:\Users\sales\MyMusicDirector`) uses.
@@ -55,18 +55,18 @@ with `D="C:/Users/sales/Videos/RustCut AI/<Title> music video"`.
    ```bash
    cd "$D/music-video-<slug>" && ffmpeg -hide_banner -loglevel error -y -start_number 1 -i shot-%02d.png -vf "scale=480:-2,drawtext=fontfile='C\:/Windows/Fonts/arialbd.ttf':text='%{eif\:n+1\:d}':x=10:y=10:fontsize=36:fontcolor=yellow:box=1:boxcolor=black@0.6,tile=4x6:padding=4" -frames:v 1 ../preview-sheet.jpg
    ```
-   Look at it yourself and list the problems: a character's look leaking into another's shot, garbled signs, shots that don't fit the story. Send it to the user and ask which shots to redraw, then whether to animate (≈ shots × $0.135).
-9. **redraw (paid, ≈ $0.07 per shot):** `MV_STAGE=redraw MV_REDRAW="12,18" MV_DESC_12="…" MV_MOTION_12="…" [MV_NO_LEAD="3"]`. To keep a character's look out of another person's shot, leave their name out of the description. Show the redrawn stills.
+   Look at it yourself and list the problems: a character's look leaking into another's shot, garbled signs, shots that don't fit the story. Send it to the user and ask which shots to redraw, then whether to animate (≈ shots × 13.5¢).
+9. **redraw (paid, ≈ 7¢ per shot):** `MV_STAGE=redraw MV_REDRAW="12,18" MV_DESC_12="…" MV_MOTION_12="…" [MV_NO_LEAD="3"]`. To keep a character's look out of another person's shot, leave their name out of the description. Show the redrawn stills.
    - **Wrong clothes:** name the outfit in full and add "(no denim)" or whatever leaked in.
    - **The lead doesn't look like herself** (wide or side-on shots): redraw as a medium three-quarter shot facing the camera, with the face lit, and list her signature features. Compare the new still with the reference side by side.
    - Pass the same `MV_CAST` to `redraw` as to `plan`.
 10. **produce (paid):** `MV_STAGE=produce`, run in the background (about 2–10 minutes). It animates the shots, assembles them on the beat with the lyrics, and exports `$D/<Title> - music video (preview 720p).mp4`.
-11. **Check and report:** sample frames (`fps=1/20,tile=4x4`), confirm the video is as long as the song, send the video, and give the total cost with a breakdown. Suggest next steps: `/broll` for treatment-based cutaways (about $0.20 a shot),
+11. **Check and report:** sample frames (`fps=1/20,tile=4x4`), confirm the video is as long as the song, send the video, and give the total cost with a breakdown. Suggest next steps: `/broll` for treatment-based cutaways (about 20¢ a shot),
 `/lip-sync` on close-up singing shots, `/reshoot` for weak cuts, and a 1080p export from RustCut.
 12. **Hand off:** if the user already has a project file elsewhere (e.g. `Downloads\<Title>.rcproj`), back it up as `<Title>.before-storyboard.rcproj`, then copy the finished `.rcproj` over it. The project must be closed in RustCut while you do this.
 
 ## Reference shots (tagged images)
-For a shot that needs specific references beyond the cast (an animal, a prop, a location), use Seedance 2.0 with tags instead of `newshot`: `@ImageN` is the N-th image given, max 9. Dry run first (free), then ask before spending (≈ $0.24/s fast, $0.30/s best):
+For a shot that needs specific references beyond the cast (an animal, a prop, a location), use Seedance 2.0 with tags instead of `newshot`: `@ImageN` is the N-th image given, max 9. Dry run first (free), then ask before spending (≈ 24¢/s fast, 30¢/s best):
 
 ```bash
 cd /c/Users/sales/MyVideoEditor && REF_IMAGES="a.png;b.png;dog.png;place.jpg" REF_PROMPT_FILE=prompt.txt REF_SECONDS=5 REF_MODEL=fast REF_OUT="$D/RustCut AI/reference shots" [REF_DRY=1] CARGO_INCREMENTAL=0 cargo test --offline --lib refshot_live -- --ignored --nocapture

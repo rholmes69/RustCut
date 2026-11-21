@@ -11,7 +11,7 @@ Each clip is 12 s of song plus 1 s before and 1 s after (14 s of audio, under th
 - **Ask before spending money.** Quote each paid step and get a yes: the keyframes, then the Seedance run. Do a `dry_run` first. Do the first clip alone and have the user check likeness, emotion and lip-sync before the rest.
 - **Never print API keys** (fal.ai: `%APPDATA%\RustCut\ai.json` `fal_key`, or `FAL_KEY`; OpenRouter: `api_key`). Error text can echo a key: filter tool output with `sed -E 's/fal_[A-Za-z0-9_:-]+/[key]/g'`.
 - **The fal.ai key must be the full `key_id:key_secret`** with no line break. If RustCut says "No fal.ai API key", the Save button in **AI → Dialogue & voices** wasn't pressed. A 401 "Expected '<key_id>:<key_secret>'" means only half the key was pasted.
-- **Prices** (fal.ai, 720p): Seedance 2.0 fast ≈ $0.24/s, **best ≈ $0.30/s**. A 10 s best clip ≈ $3.03, a 14 s clip ≈ $4.20. Gemini keyframe ≈ $0.07. A whole 3:40 song is ~19 clips (≈ $60+), so for a small budget do the hero clips only (choruses, bridge) and fill the rest with cheaper shots.
+- **Prices** (fal.ai, 720p): Seedance 2.0 fast ≈ 24¢/s, **best ≈ 30¢/s**. A 10 s best clip ≈ 3.03 USD, a 14 s clip ≈ 4.20 USD. Gemini keyframe ≈ 7¢. A whole 3:40 song is ~19 clips (≈ 60 USD+), so for a small budget do the hero clips only (choruses, bridge) and fill the rest with cheaper shots.
 - Warn the user before changing a project that is open in RustCut.
 - Run Python with `PYTHONIOENCODING=utf-8` on Windows, or printing a "→" crashes the driver before any paid call.
 
@@ -33,7 +33,7 @@ Amber backlight, steam, droplets on her shoulders, shallow depth of field.
 ```
 **Acting direction is what makes it great.** Tie each shot to the words and the song's arc (restraint, then yearning, then a belt). Name the expression (brows, eyes closing, jaw, trembling lips, smirk). Keep the mouth visible in the singing shots. Put cutaways (hands, water, details) between them. Don't put a mic in front of the face. Describe wardrobe only if it differs from the keyframe.
 
-## 3. Draw the keyframe (paid ≈ $0.07 each, draw 2)
+## 3. Draw the keyframe (paid ≈ 7¢ each, draw 2)
 **Seedance refuses real-person photos and frames made by a face-trained LoRA** ("likenesses of real people", HTTP 422, no charge). It accepts an AI-drawn still. So draw the start frame with Gemini from the cleaned reference photos (crop off phone UI bars and overlay cards first):
 
 ```bash
@@ -54,4 +54,4 @@ reference_shot { prompt: "<prompt>", images: ["<chosen keyframe>"], audio: "<cli
 - Report the running cost against the budget.
 
 ## Fallback: Kling Pro + lip-sync (when Seedance refuses the frame)
-Kling accepts LoRA frames. Animate with `fal-ai/kling-video/v2.1/pro/image-to-video` (≈ $0.098/s) and write the acting into the prompt, then fix the mouth with **`fal-ai/sync-lipsync/v2`** and `"model": "lipsync-2-pro"` (≈ $5/min). Do **not** use the old `fal-ai/sync-lipsync` (v1): its mouths looked bad. Expect a stiffer face than Seedance gives. Always check a download works: download with `requests` (not `urllib`, which fails SSL checks here) and log each result URL before downloading, because a failed download loses a paid image.
+Kling accepts LoRA frames. Animate with `fal-ai/kling-video/v2.1/pro/image-to-video` (≈ 9.8¢/s) and write the acting into the prompt, then fix the mouth with **`fal-ai/sync-lipsync/v2`** and `"model": "lipsync-2-pro"` (≈ 5 USD/min). Do **not** use the old `fal-ai/sync-lipsync` (v1): its mouths looked bad. Expect a stiffer face than Seedance gives. Always check a download works: download with `requests` (not `urllib`, which fails SSL checks here) and log each result URL before downloading, because a failed download loses a paid image.

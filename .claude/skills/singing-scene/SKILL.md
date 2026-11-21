@@ -23,11 +23,11 @@ P="$D/<Title>.rcproj"
 
   | Step | Cost |
   |---|---|
-  | The still | ≈ $0.07 |
-  | Seedance fast, per second of video | ≈ $0.24 |
-  | Seedance best, per second of video | ≈ $0.30 |
+  | The still | ≈ 7¢ |
+  | Seedance fast, per second of video | ≈ 24¢ |
+  | Seedance best, per second of video | ≈ 30¢ |
 
-  The video is the span plus 1 s: the Bond Money choir take was 11 s of song, 12 s of video, **$2.90**. A refusal costs nothing.
+  The video is the span plus 1 s: the Bond Money choir take was 11 s of song, 12 s of video, **2.90 USD**. A refusal costs nothing.
 
 ## 1. Choose the span (free)
 - Find the lyric lines the user wants. Get their times from the project's Lyrics track (`get_project`) or from the music-video `storyboard.json` slots.
@@ -37,7 +37,7 @@ P="$D/<Title>.rcproj"
   - **On top:** in Bond Money the take went on the overlay track above the main track, so the shots under it stay as a fallback.
   - **On the main track:** it then replaces the shot that's there.
 
-## 2. Draw the still (paid ≈ $0.07)
+## 2. Draw the still (paid ≈ 7¢)
 Write a description based on `still-example-bond-money.txt`. These choices made the take work:
 - **A three-quarter angle, medium shot, waist up, facing toward the camera**, with the **mouth fully visible**:
   - Put the mic on a stand below the chin, in the soft-focus foreground. Never put the mic in her hand at her mouth.
@@ -91,7 +91,7 @@ python -I $S run --project "$P" --still "<still.png>" --start <t> --end <t> --tr
 **If fal refuses it** ("likenesses of real people", content_policy_violation): you aren't charged and the project is unchanged.
 - Don't retry the same still. Redraw it with a different angle and light: the Bond Money still was refused twice, and a **three-quarter angle** redraw passed.
 - Leave `--sheet` off: a character sheet didn't help.
-- **Fallback (one call):** `lip_sync_still {image: "<still>", audio_clip_id: <song clip>, start: <t>, end: <t>, method: "animate_sync", direction: "<gestures>", dry_run: true}`, then run it without `dry_run`. It animates the still with a steady-face prompt (Wan 3.0 by default; `video_model` for Hailuo or Kling), lip-syncs it with lipsync-2-pro and places it, recording takes. ≈ $1.66 for 10.6 s; the Bond Money choir redo used exactly this chain. No speed fix is needed afterwards.
+- **Fallback (one call):** `lip_sync_still {image: "<still>", audio_clip_id: <song clip>, start: <t>, end: <t>, method: "animate_sync", direction: "<gestures>", dry_run: true}`, then run it without `dry_run`. It animates the still with a steady-face prompt (Wan 3.0 by default; `video_model` for Hailuo or Kling), lip-syncs it with lipsync-2-pro and places it, recording takes. ≈ 1.66 USD for 10.6 s; the Bond Money choir redo used exactly this chain. No speed fix is needed afterwards.
 - **By hand (old MCP server):** animate with the pipeline (`MV_STAGE=newshot MV_STILL=<still> MV_VIDEO_MODEL=alibaba/wan-3.0 MV_MOTION="<direction>" MV_SECONDS=<span+2>`), `replace_media` it into the clip, set `source_in` 1 and volume 0, then `lip_sync {model: "lipsync-2-pro"}`. Keep the mouth soft in the motion prompt: a wide-open, crying mouth gave jagged teeth after the sync.
 
 ## 6. Fix the sync (free)
@@ -119,22 +119,22 @@ python -I $S run --project "$P" --still "<still.png>" --start <t> --end <t> --tr
   - the clip's place and speed;
   - the backups;
   - the cost: stills, plus the performance, plus any fallback.
-- Bond Money's scene cost **about $4.57** in total. That included one wasted still and both takes (A and B).
+- Bond Money's scene cost **about 4.57 USD** in total. That included one wasted still and both takes (A and B).
 
 ## Gotchas
-- **Last Night's stills were refused twice** (shot 15 and a fresh three-quarter redraw). Its lead was drawn from real photos and looks very like them, so expect a refusal when the cast reference is a real photo. Offer Kling + lipsync-2 after one refusal on such a project. That piano take cost $0.07 for the still, $1.01 for Kling (12 s) and $0.60 for lipsync-2. To do it: import the Kling video, `add_clip` it on the span, set volume 0, call `lip_sync {video_clip_id, voice_clip_id: <song clip>}`, then `save_project` to a copy for review.
+- **Last Night's stills were refused twice** (shot 15 and a fresh three-quarter redraw). Its lead was drawn from real photos and looks very like them, so expect a refusal when the cast reference is a real photo. Offer Kling + lipsync-2 after one refusal on such a project. That piano take cost 7¢ for the still, 1.01 USD for Kling (12 s) and 60¢ for lipsync-2. To do it: import the Kling video, `add_clip` it on the span, set volume 0, call `lip_sync {video_clip_id, voice_clip_id: <song clip>}`, then `save_project` to a copy for review.
 - **For the animation before lipsync-2, test the models first and keep the face steady.**
   - **What went wrong first:** Kling v3.0 Std with a big emotional prompt (throwing her head back, turning to the lens) morphed Aishyla's face. The tear in the still plus "heartfelt… eyes squeeze shut" made her look like she was crying, which the user disliked.
   - **What fixed it:** a calm, confident still (mouth open on a soft note, "no tears, dry cheeks", seated *at* the keyboard with her hands on the keys) and a steady prompt (`Videos\RustCut AI\Last Night music video\direction-steady.txt`: head mostly still, "exactly the same face throughout", soft half-lidded eyes).
-  - **The test:** 5 s of each model ($1.64 for three), compared on face crops (`fps=2,crop=…,tile=10x1`, one row per model).
+  - **The test:** 5 s of each model (1.64 USD for three), compared on face crops (`fps=2,crop=…,tile=10x1`, one row per model).
 
     | Model | Result |
     |---|---|
     | Hailuo 3 | The steadiest face, the least movement |
-    | Wan 3.0 | Steady face, the most singing, a strong push-in. **The user's pick** ($1.02 for 12 s) |
+    | Wan 3.0 | Steady face, the most singing, a strong push-in. **The user's pick** (1.02 USD for 12 s) |
     | Kling v3.0 Pro | Drifted into a wide grin |
 
-  - **Last Night's final piano take** cost $1.62 (Wan plus lipsync-2). The whole scene, including the false starts, cost $5.15.
+  - **Last Night's final piano take** cost 1.62 USD (Wan plus lipsync-2). The whole scene, including the false starts, cost 5.15 USD.
 - **A lipsync-2 take needs no speed fix.** Its output is as long as the span, and the mouth is driven by the song. `fit` is for Seedance takes, and only works when the face stays fairly still. On the Last Night Kling take, the head tilted and turned and the scores were noise. Judge by the mouth frames and the preview instead.
 - **Moving the take later breaks the sync.** If someone drags it in RustCut, run `fit` again. A big recommended shift (over 0.5 s) means it was moved.
 - `run` and `apply` drive `target/release/rustcut-mcp.exe`. If it was rebuilt while locked, use the current one; the old copies are named `rustcut-mcp-old*.exe`.
