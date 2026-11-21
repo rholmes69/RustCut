@@ -805,11 +805,14 @@ total spent: ${:.3}", sb.dir.display(), sb.spent);
                 } else {
                     ""
                 };
-                let prompt = format!(
-                    "Photorealistic character reference sheet of one person, {name}: {look}.{face} Same person shown four times on a plain light-grey studio background: \
-                     full-body front view, full-body three-quarter view, full-body side profile, and a head-and-shoulders close-up of the face. \
-                     Consistent face, hairstyle, skin tone, outfit and accessories in every view. Soft even studio lighting, sharp detail, no text, no labels, no watermark."
-                );
+                // MV_SHEET_FULL_PROMPT replaces the person template (an animal, a prop).
+                let prompt = std::env::var("MV_SHEET_FULL_PROMPT").unwrap_or_else(|_| {
+                    format!(
+                        "Photorealistic character reference sheet of one person, {name}: {look}.{face} Same person shown four times on a plain light-grey studio background: \
+                         full-body front view, full-body three-quarter view, full-body side profile, and a head-and-shoulders close-up of the face. \
+                         Consistent face, hairstyle, skin tone, outfit and accessories in every view. Soft even studio lighting, sharp detail, no text, no labels, no watermark."
+                    )
+                });
                 let references = reference.iter().map(|p| (std::fs::read(p).expect("MV_SHEET_REF"), crate::ai::storyboard::mime_for(p))).collect();
                 let req = crate::ai::image_gen::ImageRequest { model: settings.image_model.clone(), prompt, aspect_ratio: Some("16:9".into()), resolution: None, transparent: false, references };
                 let img = crate::ai::image_gen::generate(&client, &req).unwrap();

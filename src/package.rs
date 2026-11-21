@@ -171,6 +171,15 @@ mod tests {
         assert_eq!(std::fs::read(&q.media[0].path).unwrap(), b"hello audio");
         assert!(q.media[0].path.starts_with(&dest));
         assert!(import_zip(&zip, &dest).is_err(), "non-empty destination is refused");
+
+        // Unzipped by hand (e.g. Windows Explorer) and opened directly: the relative media
+        // paths resolve against the project's folder, not the app's working directory.
+        let manual = dir.join("by hand");
+        let mut za = zip::ZipArchive::new(std::fs::File::open(&zip).unwrap()).unwrap();
+        za.extract(&manual).unwrap();
+        let q = Project::load(&manual.join(PROJECT_FILE)).unwrap();
+        assert_eq!(q.media[0].path, manual.join("media").join("1-a.wav"));
+        assert_eq!(std::fs::read(&q.media[0].path).unwrap(), b"hello audio");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
