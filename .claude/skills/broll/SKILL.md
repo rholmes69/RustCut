@@ -5,7 +5,7 @@ description: Write cinematic b-roll shots (gimbal moves such as a Zhiyun Crane 3
 
 # B-roll from a video treatment
 
-Proven on "Last Night" (Aishyla): 5 b-roll shots, $0.34 for the stills plus a $0.07 redraw and $0.65 to animate, cut into a 71-clip story-order video. The 22 shots already animated were reused for free. The worked example is in `example-last-night.json`.
+Proven on "Last Night" (Aishyla): 5 b-roll shots, 34¢ for the stills plus a 7¢ redraw and 65¢ to animate, cut into a 71-clip story-order video. The 22 shots already animated were reused for free. The worked example is in `example-last-night.json`.
 
 ## Rules (always)
 - **Ask before spending money.** Show the prompts and the estimate first. Stop after the stills so the user can approve them before animating.
@@ -16,11 +16,11 @@ Proven on "Last Night" (Aishyla): 5 b-roll shots, $0.34 for the stills plus a $0
 ## Prices (OpenRouter, measured)
 | Step | Cost |
 |---|---|
-| Each b-roll still | ≈ $0.068 |
-| Each b-roll shot animated (grok-imagine-video lite, 4 s) | ≈ $0.13 |
+| Each b-roll still | ≈ 6.8¢ |
+| Each b-roll shot animated (grok-imagine-video lite, 4 s) | ≈ 13¢ |
 | Re-cut and export (shots already animated are reused) | free |
 
-Estimate = n × $0.07 + n × $0.13 ≈ **$0.20 per b-roll shot**. Five shots cost about $1.
+Estimate = n × 7¢ + n × 13¢ ≈ **20¢ per b-roll shot**. Five shots cost about 1 USD.
 
 ## 1. Read the treatment and the cut (free)
 - Read the treatment, `theme.txt` (the wardrobe and the look by act) and the lyrics.
@@ -62,7 +62,7 @@ Write **one shot per act or story beat**: 5 for a 3–4 minute song. Draw each o
 
 **Output:** give the user the five shots as a numbered list, each with a title, the lyric or moment it covers, the description, the motion, the Crane move, and the estimate. When they only asked for prompts, stop here.
 
-## 3. Add and draw (paid ≈ $0.07 per still, ask first)
+## 3. Add and draw (paid ≈ 7¢ per still, ask first)
 1. Write the shots to `$D/broll.json` as `[{"description": "…", "motion": "…", "seconds": 4}, …]`.
 2. Add them: `python -I .claude/skills/broll/broll.py add "$SB" "$D/broll.json"`. This backs up `storyboard.before-broll.json` once, then appends the shots as `no_lead` with no frame yet.
 3. Draw only the missing stills, passing the same cast as the plan. The cast is still needed for the existing shots' redraws; b-roll gets none:
@@ -87,7 +87,7 @@ Then place them: `python -I .claude/skills/broll/broll.py place "$SB" "40=23,53=
 
 **A story told out of order:** if the first cut was made in `sections` mode and repeats shots out of order, fix the order in this same pass. Rewrite `slots[].shot` so the story runs in order; Last Night's order is in its `WORKFLOW` file. Back up the project as `<Title>.before-recut.rcproj` first.
 
-## 5. Animate and re-cut (paid ≈ $0.13 per new shot, ask first)
+## 5. Animate and re-cut (paid ≈ 13¢ per new shot, ask first)
 1. Back up the project: `cp "$D/<Title>.rcproj" "$D/<Title>.before-broll.rcproj"`.
 2. Run produce in the background (about 3 minutes):
    ```bash
@@ -100,7 +100,7 @@ Then place them: `python -I .claude/skills/broll/broll.py place "$SB" "40=23,53=
    - each b-roll lands on its lyric;
    - the titles are still there;
    - no animation flaws.
-4. **Report:** the preview path, the cost (stills, redraws, animation, plus "N shots reused free"), the backups, and the frame check. Offer to redo a single flawed animation (≈ $0.13).
+4. **Report:** the preview path, the cost (stills, redraws, animation, plus "N shots reused free"), the backups, and the frame check. Offer to redo a single flawed animation (≈ 13¢).
 
 ## Text-only alternative
 For an abstract shot with no still to approve (smoke, light leaks, a city timelapse): `MV_STAGE=t2v MV_PROMPT_FILE=prompt.txt MV_SECONDS=6 [MV_DRY=1]`. It uses Kling by default. Do a dry run first: it prints the estimate. The video lands in `$D/RustCut AI/new shots/` for placing by hand in RustCut; it isn't added to the storyboard.
