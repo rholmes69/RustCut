@@ -2073,7 +2073,34 @@ impl Project {
         let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         let mut p: Project = serde_json::from_str(&text).context("not a valid RustCut project")?;
         p.main_track();
+        // Relative paths (a project zip unpacked by hand, a project folder moved between
+        // computers) belong to the project file's folder, not to the app's working directory.
+        if let Some(dir) = path.parent() {
+            p.resolve_relative_paths(dir);
+        }
         Ok(p)
+    }
+
+    /// Makes relative media, thumbnail and LUT paths absolute against `dir`.
+    pub fn resolve_relative_paths(&mut self, dir: &Path) {
+        let abs = |p: &mut PathBuf| {
+            if p.is_relative() && !p.as_os_str().is_empty() {
+                *p = dir.join(&*p);
+            }
+        };
+        for m in &mut self.media {
+            abs(&mut m.path);
+        }
+        if let Some(t) = self.thumbnail.as_mut() {
+            abs(t);
+        }
+        for track in &mut self.tracks {
+            for clip in &mut track.clips {
+                if let Some(l) = clip.grade.lut.as_mut() {
+                    abs(l);
+                }
+            }
+        }
     }
 }
 
