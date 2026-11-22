@@ -409,6 +409,35 @@ pub fn timeline_sections(project: &Project) -> Vec<SectionMark> {
         .collect()
 }
 
+/// Display names for song sections, numbered when a kind repeats:
+/// "Intro", "Verse 1", "Pre-Chorus 1", "Chorus 1", "Verse 2", …, "Bridge", "Outro".
+pub fn section_names(sections: &[SectionMark]) -> Vec<String> {
+    let title = |l: &str| -> String {
+        let l = if l.is_empty() { "section" } else { l };
+        l.split('-')
+            .map(|w| {
+                let mut c = w.chars();
+                c.next().map(|f| f.to_uppercase().chain(c).collect::<String>()).unwrap_or_default()
+            })
+            .collect::<Vec<_>>()
+            .join("-")
+    };
+    let count = |l: &str| sections.iter().filter(|s| s.label == l).count();
+    let mut seen: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    sections
+        .iter()
+        .map(|s| {
+            let n = seen.entry(s.label.as_str()).or_insert(0);
+            *n += 1;
+            if count(&s.label) > 1 {
+                format!("{} {}", title(&s.label), n)
+            } else {
+                title(&s.label)
+            }
+        })
+        .collect()
+}
+
 /// How often to cut or pulse.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Every {
@@ -706,6 +735,13 @@ fn cut_points_from(beats: &[BeatMark], from: f64, to: f64, every: Every) -> Vec<
 mod tests {
     use super::*;
     use crate::model::MediaItem;
+
+    #[test]
+    fn section_names_number_repeats() {
+        let m = |l: &str| SectionMark { start: 0.0, end: 1.0, label: l.into(), energy: 0.0 };
+        let s = [m("intro"), m("verse"), m("pre-chorus"), m("chorus"), m("verse"), m("chorus"), m("bridge"), m("outro"), m("")];
+        assert_eq!(section_names(&s), ["Intro", "Verse 1", "Pre-Chorus", "Chorus 1", "Verse 2", "Chorus 2", "Bridge", "Outro", "Section"]);
+    }
 
     /// A synthetic track: kick on every beat (louder on beat 1 of each bar), quiet first
     /// 8 bars then a loud section.

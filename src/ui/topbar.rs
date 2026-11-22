@@ -153,6 +153,14 @@ pub fn show(ctx: &Context, app: &mut EditorApp) {
                         ui.close_menu();
                     }
                     ui.separator();
+                    let mut sections = app.timeline.show_sections;
+                    if ui
+                        .checkbox(&mut sections, "🎵 Song sections on the timeline")
+                        .on_hover_text("The colour-coded verse / chorus / bridge band under the ruler, for music videos. Turn it off for films; RustCut remembers.")
+                        .changed()
+                    {
+                        crate::ui::timeline::set_show_sections(app, sections);
+                    }
                     ui.menu_button("⚡ Preview proxies", |ui| {
                         ui.set_min_width(260.0);
                         let (have, need) = crate::ui::retime::proxy_counts(app);
