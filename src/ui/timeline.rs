@@ -11,6 +11,22 @@ use egui::{
 
 const HEADER_W: f32 = 150.0;
 const RULER_H: f32 = 26.0;
+/// The song-section band under the ruler (only when the song has sections).
+const SECTION_H: f32 = 18.0;
+
+/// Colour of a song section on the timeline.
+pub fn section_color(label: &str) -> Color32 {
+    match label {
+        "intro" => Color32::from_rgb(80, 160, 165),
+        "verse" => Color32::from_rgb(70, 140, 230),
+        "pre-chorus" => Color32::from_rgb(235, 160, 55),
+        "chorus" => Color32::from_rgb(230, 80, 140),
+        "bridge" => Color32::from_rgb(60, 185, 120),
+        "break" => Color32::from_rgb(140, 110, 220),
+        "outro" => Color32::from_rgb(120, 125, 150),
+        _ => Color32::from_rgb(110, 110, 125),
+    }
+}
 const TRACK_GAP: f32 = 5.0;
 const HANDLE_W: f32 = 8.0;
 const MIN_PPS: f32 = 2.0;
@@ -84,11 +100,13 @@ pub struct TimelineState {
     /// The ruler's right-click menu: the marker under the pointer, else where it opened.
     menu_marker: Option<usize>,
     menu_time: f64,
+    /// Show the song-section band (verse, pre-chorus, chorus, bridge…) under the ruler.
+    pub show_sections: bool,
 }
 
 impl Default for TimelineState {
     fn default() -> Self {
-        Self { pps: 60.0, scroll_x: 0.0, scroll_y: 0.0, snap: true, drag: None, snap_guide: None, body_width: 800.0, reveal: None, editing_marker: None, menu_marker: None, menu_time: 0.0 }
+        Self { pps: 60.0, scroll_x: 0.0, scroll_y: 0.0, snap: true, drag: None, snap_guide: None, body_width: 800.0, reveal: None, editing_marker: None, menu_marker: None, menu_time: 0.0, show_sections: crate::prefs::load().show_sections }
     }
 }
 
@@ -125,6 +143,19 @@ fn toolbar(ui: &mut Ui, app: &mut EditorApp) {
         if ui.selectable_label(app.timeline.snap, snap_label).on_hover_text("Snap to clips and playhead").clicked() {
             app.timeline.snap = !app.timeline.snap;
         }
+        let has_sections = !crate::music::timeline_sections(&app.project).is_empty();
+        // Only offered when the project has a song with sections; the on/off choice is remembered.
+        if has_sections {
+            let sec_label = RichText::new("🎵  Sections").color(if app.timeline.show_sections { theme::ACCENT } else { theme::TEXT_DIM });
+            let tip = if app.timeline.show_sections {
+                "Hide the song-section band under the ruler (remembered for next time)"
+            } else {
+                "Show the song's intro, verses, pre-choruses, choruses, bridge and outro under the ruler"
+            };
+            if ui.selectable_label(app.timeline.show_sections, sec_label).on_hover_text(tip).clicked() {
+                set_show_sections(app, !app.timeline.show_sections);
+            }
+        }
 
         if let Some((p, stage)) = app.retime.progress() {
             ui.separator();
@@ -151,6 +182,12 @@ fn toolbar(ui: &mut Ui, app: &mut EditorApp) {
             ui.label(widgets::dim("Zoom"));
         });
     });
+}
+
+/// Turns the song-section band on or off and remembers the choice for next time.
+pub fn set_show_sections(app: &mut EditorApp, on: bool) {
+    app.timeline.show_sections = on;
+    crate::prefs::update(|p| p.show_sections = on);
 }
 
 /// Picks a ruler step so labels are at least ~80 px apart.
@@ -356,8 +393,11 @@ fn lanes(ui: &mut Ui, app: &mut EditorApp) {
     let header = Rect::from_min_max(rect.min, pos2(rect.min.x + HEADER_W, rect.max.y));
     let lanes_rect = Rect::from_min_max(pos2(header.max.x, rect.min.y), rect.max);
     let ruler = Rect::from_min_max(lanes_rect.min, pos2(lanes_rect.max.x, lanes_rect.min.y + RULER_H));
-    let body = Rect::from_min_max(pos2(lanes_rect.min.x, ruler.max.y), lanes_rect.max);
-    let header_body = Rect::from_min_max(pos2(header.min.x, ruler.max.y), header.max);
+    let sections = if app.timeline.show_sections { crate::music::timeline_sections(&app.project) } else { Vec::new() };
+    let band_h = if sections.is_empty() { 0.0 } else { SECTION_H };
+    let band = Rect::from_min_max(pos2(lanes_rect.min.x, ruler.max.y), pos2(lanes_rect.max.x, ruler.max.y + band_h));
+    let body = Rect::from_min_max(pos2(lanes_rect.min.x, band.max.y), lanes_rect.max);
+    let header_body = Rect::from_min_max(pos2(header.min.x, band.max.y), header.max);
     app.timeline.body_width = body.width();
 
     // Layout of tracks (before scrolling is clamped).
@@ -376,7 +416,7 @@ fn lanes(ui: &mut Ui, app: &mut EditorApp) {
             tl.scroll_x = t_at - ((px - body.left()) / tl.pps) as f64;
         } else {
             tl.scroll_x -= (scroll.x / tl.pps) as f64;
-            if max_scroll_y > 0.0 && pointer.is_some_and(|p| p.x < body.left() || p.y > ruler.bottom()) {
+            if max_scroll_y > 0.0 && pointer.is_some_and(|p| p.x < body.left() || p.y > body.top()) {
                 tl.scroll_y -= scroll.y;
             } else {
                 tl.scroll_x -= (scroll.y / tl.pps) as f64;
@@ -846,23 +886,55 @@ fn lanes(ui: &mut Ui, app: &mut EditorApp) {
         }
         t += minor;
     }
-    // Beat grid and song sections.
-    let sections = crate::music::timeline_sections(&app.project);
-    for s in &sections {
-        let (x0, x1) = (t2x(s.start).max(ruler.left()), t2x(s.end).min(ruler.right()));
-        if x1 <= x0 {
-            continue;
+    // Song sections: a colour-coded band under the ruler ("Verse 1", "Pre-Chorus", "Chorus 2"…),
+    // with a faint line through the lanes where each section starts.
+    if !sections.is_empty() {
+        painter.rect_filled(band, 0.0, theme::BG);
+        let bp = painter.with_clip_rect(band);
+        let names = crate::music::section_names(&sections);
+        let hover = ctx.input(|i| i.pointer.hover_pos()).filter(|p| band.contains(*p));
+        let mut hovered = None;
+        for (i, s) in sections.iter().enumerate() {
+            let (x0, x1) = (t2x(s.start), t2x(s.end));
+            if x1 < band.left() || x0 > band.right() {
+                continue;
+            }
+            let color = section_color(&s.label);
+            let r = Rect::from_min_max(pos2(x0 + 1.0, band.top() + 2.0), pos2(x1 - 1.0, band.bottom() - 2.0));
+            let hot = hover.is_some_and(|p| p.x >= x0 && p.x < x1);
+            if hot {
+                hovered = Some(i);
+            }
+            bp.rect_filled(r, 3.0, if hot { color } else { color.gamma_multiply(0.75) });
+            // Keep the name visible while the section's start is scrolled off to the left.
+            let lx = r.left().max(band.left()) + 5.0;
+            let room = r.right() - lx - 3.0;
+            if room > 14.0 {
+                let galley = bp.layout_no_wrap(names[i].clone(), FontId::proportional(10.5), Color32::WHITE);
+                if galley.size().x <= room || room > 40.0 {
+                    bp.with_clip_rect(r.intersect(band)).galley(pos2(lx, band.center().y - galley.size().y / 2.0), galley, Color32::WHITE);
+                }
+            }
+            if x0 >= body.left() {
+                body_painter.line_segment([pos2(x0, body.top()), pos2(x0, body.bottom())], Stroke::new(1.0_f32, color.gamma_multiply(0.35)));
+            }
         }
-        let color = match s.label.as_str() {
-            "chorus" => Color32::from_rgb(230, 80, 140),
-            "verse" => Color32::from_rgb(70, 140, 230),
-            "break" => Color32::from_rgb(140, 110, 220),
-            _ => Color32::from_rgb(110, 110, 125),
-        };
-        let strip = Rect::from_min_max(pos2(x0, ruler.top()), pos2(x1 - 1.0, ruler.top() + 3.0));
-        rp.rect_filled(strip, 0.0, color);
-        if x1 - x0 > 60.0 {
-            rp.text(pos2(x0 + 3.0, ruler.top() + 13.0), Align2::LEFT_TOP, &s.label, FontId::proportional(9.5), color);
+        let resp = ui.interact(band, ui.id().with("tl-sections"), Sense::click());
+        if let Some(i) = hovered {
+            let s = &sections[i];
+            let resp = resp.clone().on_hover_text(format!(
+                "{}  ·  {} – {}  ({:.1} s)\nClick to jump to its start",
+                names[i],
+                widgets::format_short(s.start),
+                widgets::format_short(s.end),
+                s.end - s.start
+            ));
+            if resp.clicked() {
+                if app.playing {
+                    app.pause();
+                }
+                app.seek(s.start);
+            }
         }
     }
     let beats = crate::music::timeline_beats(&app.project);
@@ -1031,6 +1103,9 @@ fn lanes(ui: &mut Ui, app: &mut EditorApp) {
         FontId::monospace(11.0),
         theme::ACCENT,
     );
+    if band.height() > 0.0 {
+        painter.text(pos2(header.left() + 10.0, band.center().y), Align2::LEFT_CENTER, "🎵 Sections", FontId::proportional(10.5), theme::TEXT_DIM);
+    }
     let hp = painter.with_clip_rect(header_body);
     let mut toggles: Vec<(usize, &'static str)> = Vec::new();
     for &(i, y0, y1) in &lane_rows {

@@ -14,6 +14,7 @@ pub mod media;
 pub mod model;
 pub mod motion_graphics;
 pub mod playback;
+pub mod prefs;
 pub mod multicam;
 pub mod music;
 pub mod package;
