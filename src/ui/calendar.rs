@@ -114,7 +114,7 @@ pub fn window(ctx: &Context, app: &mut EditorApp) {
             crate::ui::google::connect_ui(ui, ctx, g, SCOPE_CALENDAR);
             return;
         }
-        crate::ui::google::account_line(ui, g);
+        crate::ui::google::account_line(ui, ctx, g, SCOPE_CALENDAR);
         if let Some(e) = &c.error {
             ui.colored_label(theme::DANGER, e);
         }

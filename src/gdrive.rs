@@ -87,10 +87,10 @@ pub fn mime_for(path: &Path) -> &'static str {
 
 /// Starts a Drive upload of `name` into the RustCut folder.
 fn start<'a>(a: &'a mut Account, name: &str, mime: &str, size: Option<u64>, cancel: &'a AtomicBool, progress: &'a mut dyn FnMut(u64)) -> Result<Resumable<'a>> {
-    let token = google::access_token(a)?;
+    let token = google::access_token(a, SCOPE_DRIVE)?;
     let folder = ensure_folder(a, &token)?;
     let meta = serde_json::json!({ "name": name, "parents": [folder] });
-    Resumable::start(a, token, &format!("{UPLOAD_API}?uploadType=resumable&fields=id,name,size,webViewLink"), &meta, mime, size, cancel, progress)
+    Resumable::start(a, SCOPE_DRIVE, token, &format!("{UPLOAD_API}?uploadType=resumable&fields=id,name,size,webViewLink"), &meta, mime, size, cancel, progress)
 }
 
 fn uploaded(v: &Value, fallback_name: &str, size: u64) -> Uploaded {

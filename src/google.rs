@@ -3,9 +3,12 @@
 //! Sign-in uses Google's flow for desktop apps: the browser opens Google's consent page, Google
 //! sends the browser back to a one-off listener on 127.0.0.1, and the code it carries is swapped
 //! for a refresh token (with PKCE). The user supplies their own OAuth client (a "Desktop app"
-//! client from Google Cloud Console). Permissions are asked for one feature at a time
-//! (incremental authorization): Drive asks for Drive, YouTube for YouTube uploads, and so on,
-//! and the one refresh token covers everything granted so far.
+//! client from Google Cloud Console). Each feature signs in for its own permission and keeps
+//! its own refresh token: Google refuses some scopes in one grant (YouTube uploads together
+//! with Drive is "Access blocked: scopes that cannot be requested together"), so grants are
+//! never merged. That also lets each feature use a different Google account: Drive on a
+//! personal Gmail, YouTube on the account (or brand channel) that owns the artist's channel.
+//! Google's account chooser is always shown.
 //!
 //! Settings, including the refresh token, are kept in `google.json` in the config folder
 //! (moved over from the older `gdrive.json` the first time).
@@ -14,6 +17,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::{Read, Write};
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -22,8 +26,12 @@ const AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const REVOKE_URL: &str = "https://oauth2.googleapis.com/revoke";
 const USERINFO_URL: &str = "https://openidconnect.googleapis.com/v1/userinfo";
-/// Asked for with every feature so the window can show which account is connected.
+/// Asked for with Drive and Calendar so the window can show which account is connected.
+/// Not with YouTube: a brand channel has no email, and asking for one makes Google's channel
+/// picker fail with "400. That's an error" (the oauth/delegation page).
 const EMAIL_SCOPES: [&str; 2] = ["openid", "email"];
+/// Lets RustCut read the connected channel's name (to show which channel uploads go to).
+pub const SCOPE_YOUTUBE_READ: &str = "https://www.googleapis.com/auth/youtube.readonly";
 const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub const SCOPE_DRIVE: &str = "https://www.googleapis.com/auth/drive.file";
@@ -35,25 +43,60 @@ pub const SCOPE_CALENDAR: &str = "https://www.googleapis.com/auth/calendar.event
 pub struct Account {
     pub client_id: String,
     pub client_secret: String,
-    pub refresh_token: String,
-    /// The signed-in account, shown in the windows.
-    pub email: String,
-    /// Every scope granted so far.
-    pub scopes: Vec<String>,
+    /// One refresh token per feature (scope → token); each may be a different account.
+    pub grants: BTreeMap<String, String>,
+    /// Who each feature is connected as (scope → email, or the YouTube channel's name).
+    pub labels: BTreeMap<String, String>,
     /// The RustCut folder RustCut made on the Drive.
     pub folder_id: String,
+    /// Older single sign-in (moved into `grants` and `labels` when loaded).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub email: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub refresh_token: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub scopes: Vec<String>,
 }
 
 impl Account {
     pub fn has_client(&self) -> bool {
         !self.client_id.trim().is_empty() && !self.client_secret.trim().is_empty()
     }
+    /// Signed in for at least one feature.
     pub fn connected(&self) -> bool {
-        self.has_client() && !self.refresh_token.is_empty()
+        self.has_client() && !self.grants.is_empty()
     }
     /// Signed in and allowed to use `scope`.
     pub fn can(&self, scope: &str) -> bool {
-        self.connected() && self.scopes.iter().any(|s| s == scope)
+        self.has_client() && self.grants.contains_key(scope)
+    }
+
+    /// Who `scope`'s sign-in is (an email or a channel name), if known.
+    pub fn label(&self, scope: &str) -> Option<&str> {
+        self.labels.get(scope).map(String::as_str).filter(|l| !l.is_empty())
+    }
+
+    /// Moves an older single sign-in into `grants` (a Drive-only one when it lists no scopes).
+    fn upgrade(&mut self) {
+        let email = std::mem::take(&mut self.email);
+        if !email.is_empty() {
+            for k in self.grants.keys() {
+                self.labels.entry(k.clone()).or_insert_with(|| email.clone());
+            }
+        }
+        if self.refresh_token.is_empty() {
+            self.scopes.clear();
+            return;
+        }
+        let token = std::mem::take(&mut self.refresh_token);
+        let scopes = std::mem::take(&mut self.scopes);
+        let known: Vec<&str> = [SCOPE_DRIVE, SCOPE_YOUTUBE, SCOPE_CALENDAR].into_iter().filter(|k| scopes.iter().any(|s| s == k)).collect();
+        for k in if known.is_empty() { vec![SCOPE_DRIVE] } else { known } {
+            self.grants.entry(k.to_string()).or_insert_with(|| token.clone());
+            if !email.is_empty() {
+                self.labels.entry(k.to_string()).or_insert_with(|| email.clone());
+            }
+        }
     }
 }
 
@@ -68,15 +111,17 @@ pub fn save(a: &Account) -> Result<()> {
 }
 
 fn load_in(dir: &Path) -> Account {
-    if let Some(a) = std::fs::read_to_string(dir.join("google.json")).ok().and_then(|s| serde_json::from_str(&s).ok()) {
+    if let Some(mut a) = std::fs::read_to_string(dir.join("google.json")).ok().and_then(|s| serde_json::from_str::<Account>(&s).ok()) {
+        if !a.refresh_token.is_empty() || !a.scopes.is_empty() || !a.email.is_empty() {
+            a.upgrade();
+            let _ = save_in(dir, &a);
+        }
         return a;
     }
     let old = dir.join("gdrive.json");
     match std::fs::read_to_string(&old).ok().and_then(|s| serde_json::from_str::<Account>(&s).ok()) {
         Some(mut a) => {
-            if a.connected() && a.scopes.is_empty() {
-                a.scopes = vec![SCOPE_DRIVE.to_string()];
-            }
+            a.upgrade();
             if save_in(dir, &a).is_ok() {
                 let _ = std::fs::remove_file(old);
             }
@@ -193,14 +238,26 @@ fn random_token(len: usize) -> String {
         .collect()
 }
 
+/// Every scope a feature's sign-in asks for.
+pub fn request_scopes(scope: &'static str) -> Vec<&'static str> {
+    match scope {
+        SCOPE_YOUTUBE => vec![SCOPE_YOUTUBE, SCOPE_YOUTUBE_READ],
+        _ => {
+            let mut v = EMAIL_SCOPES.to_vec();
+            v.push(scope);
+            v
+        }
+    }
+}
+
+/// The consent page; it always shows Google's account chooser (and, for YouTube, the
+/// channel chooser) so a feature can use a different account from the browser's.
 pub fn auth_url(client_id: &str, redirect: &str, scopes: &[&str], challenge: &str, state: &str) -> String {
-    let mut all: Vec<&str> = EMAIL_SCOPES.to_vec();
-    all.extend(scopes.iter().copied().filter(|s| !EMAIL_SCOPES.contains(s)));
     format!(
-        "{AUTH_URL}?client_id={}&redirect_uri={}&response_type=code&scope={}&access_type=offline&prompt=consent&include_granted_scopes=true&code_challenge={}&code_challenge_method=plain&state={}",
+        "{AUTH_URL}?client_id={}&redirect_uri={}&response_type=code&scope={}&access_type=offline&prompt=select_account%20consent&code_challenge={}&code_challenge_method=plain&state={}",
         enc(client_id),
         enc(redirect),
-        enc(&all.join(" ")),
+        enc(&scopes.join(" ")),
         enc(challenge),
         enc(state)
     )
@@ -264,14 +321,16 @@ fn wait_for_code(listener: &std::net::TcpListener, state: &str, cancel: &AtomicB
     }
 }
 
-/// Signs in with the browser, asking for `scopes` on top of what was granted before, and
-/// returns the account with a refresh token (also saved). `open_url` opens the consent page.
-pub fn sign_in(client_id: &str, client_secret: &str, scopes: &[&str], open_url: &dyn Fn(&str), cancel: &AtomicBool) -> Result<Account> {
+/// Signs one feature (`scope`) in with the browser, on whichever account the user picks, and
+/// keeps its refresh token and who it is; other features' sign-ins are left as they are.
+/// `open_url` opens the consent page.
+pub fn sign_in(client_id: &str, client_secret: &str, scope: &'static str, open_url: &dyn Fn(&str), cancel: &AtomicBool) -> Result<Account> {
+    let scopes = request_scopes(scope);
     let listener = std::net::TcpListener::bind("127.0.0.1:0").context("starting the sign-in listener")?;
     let redirect = format!("http://127.0.0.1:{}/", listener.local_addr()?.port());
     let verifier = random_token(64);
     let state = random_token(24);
-    open_url(&auth_url(client_id, &redirect, scopes, &verifier, &state));
+    open_url(&auth_url(client_id, &redirect, &scopes, &verifier, &state));
     let code = wait_for_code(&listener, &state, cancel)?;
     let resp: Value = agent()
         .post(TOKEN_URL)
@@ -288,21 +347,23 @@ pub fn sign_in(client_id: &str, client_secret: &str, scopes: &[&str], open_url: 
     let refresh = resp["refresh_token"].as_str().ok_or_else(|| anyhow!("Google didn't return a refresh token"))?;
     let access = resp["access_token"].as_str().unwrap_or_default().to_string();
     let granted: Vec<String> = resp["scope"].as_str().unwrap_or_default().split_whitespace().map(str::to_string).collect();
-    let missing: Vec<&str> = scopes.iter().copied().filter(|s| !granted.iter().any(|g| g == s)).collect();
+    if !granted.iter().any(|g| g == scope) {
+        bail!("Google didn't grant {} — tick its box on the consent page and try again", scope_label(scope));
+    }
+    let who = if scope == SCOPE_YOUTUBE { channel_name(&access).unwrap_or_default() } else { account_email(&access).unwrap_or_default() };
     let mut a = load();
-    let email = account_email(&access).unwrap_or_default();
-    if !a.email.is_empty() && !email.is_empty() && a.email != email {
+    if a.client_id != client_id {
+        a.grants.clear(); // tokens belong to the client that made them
+        a.labels.clear();
+    }
+    if scope == SCOPE_DRIVE && a.label(SCOPE_DRIVE).is_some_and(|old| old != who) {
         a.folder_id.clear(); // a different account: its Drive has no RustCut folder yet
     }
     a.client_id = client_id.to_string();
     a.client_secret = client_secret.to_string();
-    a.refresh_token = refresh.to_string();
-    a.email = email;
-    a.scopes = granted;
+    a.grants.insert(scope.to_string(), refresh.to_string());
+    a.labels.insert(scope.to_string(), who);
     save(&a)?;
-    if !missing.is_empty() {
-        bail!("Google didn't grant {} — tick every box on the consent page and sign in again", missing.iter().map(|s| scope_label(s)).collect::<Vec<_>>().join(", "));
-    }
     Ok(a)
 }
 
@@ -316,34 +377,53 @@ pub fn scope_label(scope: &str) -> &'static str {
     }
 }
 
+/// "Aidan B. (@aidanb)": the channel the YouTube sign-in uploads to.
+fn channel_name(token: &str) -> Result<String> {
+    let v: Value = agent()
+        .get("https://www.googleapis.com/youtube/v3/channels?part=snippet&mine=true")
+        .set("Authorization", &format!("Bearer {token}"))
+        .call()
+        .map_err(api_error)?
+        .into_json()?;
+    let s = &v["items"][0]["snippet"];
+    let title = s["title"].as_str().unwrap_or_default();
+    Ok(match s["customUrl"].as_str() {
+        Some(handle) if !title.is_empty() => format!("{title} ({handle})"),
+        _ => title.to_string(),
+    })
+}
+
 fn account_email(token: &str) -> Result<String> {
     let v: Value = agent().get(USERINFO_URL).set("Authorization", &format!("Bearer {token}")).call().map_err(api_error)?.into_json()?;
     Ok(v["email"].as_str().unwrap_or_default().to_string())
 }
 
-/// Forgets the sign-in (and revokes it at Google, best effort). The client id stays.
-pub fn sign_out() -> Result<Account> {
+/// Forgets one feature's sign-in (and revokes it at Google, best effort, unless another
+/// feature shares the token). The client id and the other features stay.
+pub fn sign_out(scope: &str) -> Result<Account> {
     let mut a = load();
-    if !a.refresh_token.is_empty() {
-        let _ = agent().post(REVOKE_URL).send_form(&[("token", a.refresh_token.as_str())]);
+    if let Some(token) = a.grants.remove(scope) {
+        if !a.grants.values().any(|t| *t == token) {
+            let _ = agent().post(REVOKE_URL).send_form(&[("token", token.as_str())]);
+        }
     }
-    a.refresh_token.clear();
-    a.email.clear();
-    a.scopes.clear();
-    a.folder_id.clear();
+    a.labels.remove(scope);
+    if scope == SCOPE_DRIVE {
+        a.folder_id.clear();
+    }
     save(&a)?;
     Ok(a)
 }
 
-/// A fresh access token for the saved sign-in.
-pub fn access_token(a: &Account) -> Result<String> {
-    if !a.connected() {
-        bail!("not signed in to Google");
-    }
+/// A fresh access token for `scope`'s sign-in.
+pub fn access_token(a: &Account, scope: &str) -> Result<String> {
+    let Some(refresh) = a.grants.get(scope).filter(|_| a.has_client()) else {
+        bail!("not signed in to Google for {}", scope_label(scope));
+    };
     let r = agent().post(TOKEN_URL).send_form(&[
         ("client_id", a.client_id.as_str()),
         ("client_secret", a.client_secret.as_str()),
-        ("refresh_token", a.refresh_token.as_str()),
+        ("refresh_token", refresh.as_str()),
         ("grant_type", "refresh_token"),
     ]);
     match r {
@@ -355,9 +435,9 @@ pub fn access_token(a: &Account) -> Result<String> {
             let body = resp.into_string().unwrap_or_default();
             if body.contains("invalid_grant") {
                 let mut a = load();
-                a.refresh_token.clear();
+                a.grants.remove(scope);
                 let _ = save(&a);
-                bail!("the Google sign-in has expired or was revoked — sign in again");
+                bail!("the Google sign-in for {} has expired or was revoked — sign in again", scope_label(scope));
             }
             bail!("Google refused the saved sign-in — check the client id and secret, then sign in again");
         }
@@ -391,6 +471,7 @@ pub fn committed(range: Option<&str>) -> u64 {
 pub struct Resumable<'a> {
     session: String,
     account: &'a Account,
+    scope: &'static str,
     token: String,
     buf: Vec<u8>,
     /// Bytes Google has confirmed (the buffer starts here).
@@ -402,14 +483,14 @@ pub struct Resumable<'a> {
 
 impl<'a> Resumable<'a> {
     /// Starts a session at `init_url` (which has `uploadType=resumable`) with `metadata`.
-    pub fn start(account: &'a Account, token: String, init_url: &str, metadata: &Value, mime: &str, size: Option<u64>, cancel: &'a AtomicBool, progress: &'a mut dyn FnMut(u64)) -> Result<Self> {
+    pub fn start(account: &'a Account, scope: &'static str, token: String, init_url: &str, metadata: &Value, mime: &str, size: Option<u64>, cancel: &'a AtomicBool, progress: &'a mut dyn FnMut(u64)) -> Result<Self> {
         let mut req = agent().post(init_url).set("Authorization", &format!("Bearer {token}")).set("X-Upload-Content-Type", mime);
         if let Some(n) = size {
             req = req.set("X-Upload-Content-Length", &n.to_string());
         }
         let resp = req.send_json(metadata.clone()).map_err(api_error)?;
         let session = resp.header("Location").ok_or_else(|| anyhow!("Google didn't start the upload"))?.to_string();
-        Ok(Self { session, account, token, buf: Vec::with_capacity(CHUNK), sent: 0, result: None, cancel, progress })
+        Ok(Self { session, account, scope, token, buf: Vec::with_capacity(CHUNK), sent: 0, result: None, cancel, progress })
     }
 
     /// Sends what's buffered (all of it on the last call, else whole 256 KiB units).
@@ -453,7 +534,7 @@ impl<'a> Resumable<'a> {
                 }
                 Err(ureq::Error::Status(401, _)) if tries < 3 => {
                     // The hour-long access token ran out during a big upload.
-                    self.token = access_token(self.account)?;
+                    self.token = access_token(self.account, self.scope)?;
                 }
                 Err(ureq::Error::Status(404 | 410, _)) => bail!("Google dropped the upload session — start the upload again"),
                 Err(e @ ureq::Error::Status(code, _)) if !(code == 429 || code >= 500) => return Err(api_error(e)),
@@ -539,10 +620,12 @@ mod tests {
 
         let mut a = Account { client_id: "id".into(), client_secret: "secret".into(), ..Default::default() };
         assert!(a.has_client() && !a.connected() && !a.can(SCOPE_DRIVE));
-        a.refresh_token = "r".into();
-        a.scopes = vec![SCOPE_DRIVE.into()];
-        assert!(a.connected() && a.can(SCOPE_DRIVE) && !a.can(SCOPE_YOUTUBE));
-        let back: Account = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
+        a.grants.insert(SCOPE_DRIVE.into(), "r1".into());
+        a.grants.insert(SCOPE_YOUTUBE.into(), "r2".into());
+        assert!(a.connected() && a.can(SCOPE_DRIVE) && a.can(SCOPE_YOUTUBE) && !a.can(SCOPE_CALENDAR));
+        let json = serde_json::to_string(&a).unwrap();
+        assert!(!json.contains("refresh_token") && !json.contains("\"scopes\""), "old fields aren't written: {json}");
+        let back: Account = serde_json::from_str(&json).unwrap();
         assert_eq!(back, a);
         assert_eq!(serde_json::from_str::<Account>("{}").unwrap(), Account::default());
     }
@@ -554,9 +637,20 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("gdrive.json"), r#"{"client_id":"id","client_secret":"s","refresh_token":"r","email":"me@example.com","folder_id":"f"}"#).unwrap();
         let a = load_in(&dir);
-        assert_eq!(a.scopes, vec![SCOPE_DRIVE.to_string()]);
+        assert_eq!(a.grants.get(SCOPE_DRIVE).map(String::as_str), Some("r"));
+        assert_eq!(a.grants.len(), 1);
         assert_eq!(a.folder_id, "f");
         assert!(dir.join("google.json").is_file() && !dir.join("gdrive.json").exists());
+
+        assert_eq!(a.label(SCOPE_DRIVE), Some("me@example.com"));
+
+        // A google.json from the single-sign-in version: its token becomes the Drive grant.
+        std::fs::write(dir.join("google.json"), format!(r#"{{"client_id":"id","client_secret":"s","refresh_token":"r","email":"me@example.com","scopes":["openid","{SCOPE_DRIVE}"]}}"#)).unwrap();
+        let a = load_in(&dir);
+        assert!(a.can(SCOPE_DRIVE) && !a.can(SCOPE_YOUTUBE));
+        assert!(a.refresh_token.is_empty() && a.scopes.is_empty() && a.email.is_empty());
+        assert_eq!(a.label(SCOPE_DRIVE), Some("me@example.com"));
+        assert!(!std::fs::read_to_string(dir.join("google.json")).unwrap().contains("refresh_token"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -564,10 +658,14 @@ mod tests {
     fn urls_and_callback_parsing() {
         assert_eq!(enc("a b/c:d"), "a%20b%2Fc%3Ad");
         assert_eq!(dec("a%20b%2Fc+d%"), "a b/c d%");
-        let url = auth_url("id.apps", "http://127.0.0.1:5000/", &[SCOPE_YOUTUBE], "verif", "st8");
+        let url = auth_url("id.apps", "http://127.0.0.1:5000/", &request_scopes(SCOPE_YOUTUBE), "verif", "st8");
         assert!(url.contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A5000%2F"));
-        assert!(url.contains("scope=openid%20email%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fyoutube.upload"));
-        assert!(url.contains("include_granted_scopes=true") && url.contains("access_type=offline") && url.contains("code_challenge=verif"));
+        // No email for YouTube: brand channels have none, and Google's channel picker fails on it.
+        assert!(url.contains("scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fyoutube.upload%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fyoutube.readonly&"), "{url}");
+        assert!(url.contains("prompt=select_account%20consent"), "always let the user pick the account");
+        assert_eq!(request_scopes(SCOPE_DRIVE), vec!["openid", "email", SCOPE_DRIVE]);
+        assert!(!url.contains("include_granted_scopes"), "grants are kept apart: Google refuses YouTube + Drive together");
+        assert!(url.contains("access_type=offline") && url.contains("code_challenge=verif"));
         let target = "/?state=st8&code=4%2F0Ab_x-y&scope=email";
         assert_eq!(query_param(target, "code").as_deref(), Some("4/0Ab_x-y"));
         assert_eq!(query_param(target, "state").as_deref(), Some("st8"));

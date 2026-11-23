@@ -98,7 +98,7 @@ pub fn window(ctx: &Context, app: &mut EditorApp) {
             crate::ui::google::connect_ui(ui, ctx, g, SCOPE_YOUTUBE);
             return;
         }
-        crate::ui::google::account_line(ui, g);
+        crate::ui::google::account_line(ui, ctx, g, SCOPE_YOUTUBE);
 
         if let Some(e) = &y.error {
             ui.colored_label(theme::DANGER, e);
