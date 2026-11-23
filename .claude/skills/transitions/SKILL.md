@@ -87,3 +87,5 @@ python -I $T check "$P"
 Every transition's start and end, and every overlay fade edge, in ms from a beat. **Under ~40 ms reads as on the beat.** It also flags gaps that stop a transition from applying. A transition into an end card after the song ends will show a large end offset; that's expected.
 
 Report: what was applied (grouped by kind), the check numbers, any cut you snapped and how, the backup name, and that the to-do list was restored. Offer the next polish (beat effects on the hook, the ending fix).
+
+**Deliver:** after a final re-export, offer to upload the video (and a project zip backup) to the user's Google Drive: see `/music-video` step 13.
