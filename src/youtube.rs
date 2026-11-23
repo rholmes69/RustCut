@@ -452,14 +452,14 @@ pub fn upload(video: &Path, details: &Details, cancel: &AtomicBool, report: &mut
     }
     let size = std::fs::metadata(video).with_context(|| format!("reading {}", video.display()))?.len();
     report(0.0, "Connecting to YouTube…");
-    let token = google::access_token(&account)?;
+    let token = google::access_token(&account, SCOPE_YOUTUBE)?;
     let body = resource(details)?;
     let url = format!(
         "{UPLOAD_API}/videos?uploadType=resumable&part=snippet,status&notifySubscribers={}",
         details.notify_subscribers && details.visibility == Visibility::Public
     );
     let mut progress = |n: u64| report(if size > 0 { 0.97 * n as f32 / size as f32 } else { 0.97 }, &format!("Uploading {} of {}", google::size_label(n), google::size_label(size)));
-    let mut up = Resumable::start(&account, token, &url, &body, crate::gdrive::mime_for(video), Some(size), cancel, &mut progress)?;
+    let mut up = Resumable::start(&account, SCOPE_YOUTUBE, token, &url, &body, crate::gdrive::mime_for(video), Some(size), cancel, &mut progress)?;
     let mut f = std::fs::File::open(video)?;
     if let Err(e) = std::io::copy(&mut f, &mut up) {
         up.abort();

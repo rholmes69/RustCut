@@ -60,7 +60,7 @@ pub fn poll(app: &mut EditorApp) {
     let (scope, _) = app.google.sign_in.take().unwrap();
     match state {
         TaskState::Done(a) => {
-            let who = if a.email.is_empty() { "your Google account".to_string() } else { a.email.clone() };
+            let who = a.label(scope).map(str::to_string).unwrap_or_else(|| "your Google account".to_string());
             app.google.account = Some(a);
             app.google.error = None;
             app.notify(format!("Connected {} for {}", who, google::scope_label(scope)));
@@ -73,21 +73,67 @@ pub fn poll(app: &mut EditorApp) {
     }
 }
 
-/// The connected account with a Disconnect button. Returns true when it was disconnected.
-pub fn account_line(ui: &mut Ui, g: &mut GoogleConnect) -> bool {
-    let email = g.account().email.clone();
+/// Who `scope` is connected as, with Switch account and Disconnect. Returns true when it was
+/// disconnected.
+pub fn account_line(ui: &mut Ui, ctx: &Context, g: &mut GoogleConnect, scope: &'static str) -> bool {
+    let who = g.account().label(scope).map(str::to_string);
     let mut gone = false;
-    ui.horizontal(|ui| {
-        ui.label(widgets::dim(if email.is_empty() { "Connected to your Google account".to_string() } else { format!("Connected to {email}") }));
-        if ui.small_button("Disconnect").on_hover_text("Forget this Google account on this computer (Drive, YouTube and Calendar)").clicked() {
-            match google::sign_out() {
+    ui.horizontal_wrapped(|ui| {
+        let what = if scope == google::SCOPE_YOUTUBE { "Uploading to" } else { "Connected to" };
+        ui.label(widgets::dim(match &who {
+            Some(w) => format!("{what} {w}"),
+            None => format!("{what} your Google account"),
+        }));
+        if g.sign_in.is_some() {
+            return;
+        }
+        let switch_tip = if scope == google::SCOPE_YOUTUBE {
+            "Sign in again and pick another Google account or brand channel for YouTube"
+        } else {
+            "Sign in again with another Google account for this"
+        };
+        if ui.small_button("Switch account").on_hover_text(switch_tip).clicked() {
+            start(ctx, g, scope);
+        }
+        if ui.small_button("Disconnect").on_hover_text(format!("Forget the {} sign-in on this computer (the others stay)", google::scope_label(scope))).clicked() {
+            match google::sign_out(scope) {
                 Ok(a) => g.account = Some(a),
                 Err(e) => g.error = Some(format!("{e:#}")),
             }
             gone = true;
         }
     });
+    if g.sign_in.is_some() {
+        waiting(ui, ctx, g);
+    } else if let Some(e) = &g.error {
+        ui.colored_label(crate::ui::theme::DANGER, e);
+    }
     gone
+}
+
+/// While the browser sign-in is open: the link (to open or copy into another Chrome
+/// profile, e.g. the one signed in to the YouTube channel's account) and Cancel.
+fn waiting(ui: &mut Ui, ctx: &Context, g: &GoogleConnect) {
+    ui.horizontal(|ui| {
+        ui.spinner();
+        ui.label("Waiting for you to allow access in the browser…");
+    });
+    let url = g.url.lock().unwrap().clone();
+    ui.horizontal(|ui| {
+        if !url.is_empty() {
+            ui.hyperlink_to("Open it again", url.clone());
+            if ui.button("📋 Copy sign-in link").on_hover_text("Paste it into the Chrome profile (or window) that's signed in to the account you want").clicked() {
+                ctx.copy_text(url);
+            }
+        }
+        if ui.button("Cancel").clicked() {
+            if let Some((_, job)) = &g.sign_in {
+                job.cancel();
+            }
+        }
+    });
+    ui.label(widgets::dim("The link works for 5 minutes, in any browser on this computer."));
+    ctx.request_repaint_after(std::time::Duration::from_millis(250));
 }
 
 /// The sign-in panel for a window that needs `scope`. Draw it when `g.can(scope)` is false.
@@ -99,26 +145,22 @@ pub fn connect_ui(ui: &mut Ui, ctx: &Context, g: &mut GoogleConnect, scope: &'st
         }
         ui.add_space(6.0);
     }
-    if let Some((_, job)) = &g.sign_in {
-        ui.horizontal(|ui| {
-            ui.spinner();
-            ui.label("Waiting for you to allow access in the browser…");
-        });
-        let url = g.url.lock().unwrap().clone();
-        if !url.is_empty() {
-            ui.hyperlink_to("The browser didn't open? Click here.", url);
-        }
-        if ui.button("Cancel").clicked() {
-            job.cancel();
-        }
-        ctx.request_repaint_after(std::time::Duration::from_millis(250));
+    if g.sign_in.is_some() {
+        waiting(ui, ctx, g);
         return;
     }
 
     let account = g.account().clone();
     if account.connected() {
         // Signed in already, just not for this: one more consent screen.
-        ui.label(format!("Allow RustCut to use {} with {}.", google::scope_label(scope), if account.email.is_empty() { "your account".to_string() } else { account.email.clone() }));
+        ui.label(format!("Allow RustCut to use {}.", google::scope_label(scope)));
+        if scope == google::SCOPE_YOUTUBE {
+            ui.label(widgets::dim(
+                "Google asks which account to use: pick the one that owns the channel, then the channel itself (e.g. a brand channel). It can be a different account from Drive's. If the account isn't yours, add it as a test user on the consent screen first.",
+            ));
+        } else {
+            ui.label(widgets::dim("Google asks which account to use; it can be a different one from your other features."));
+        }
         ui.label(widgets::dim("Make sure the matching API is enabled in your Google Cloud project (APIs & Services > Library)."));
         ui.add_space(4.0);
         if ui.button(RichText::new(format!("Allow {}", google::scope_label(scope))).strong()).clicked() {
@@ -176,7 +218,7 @@ fn start(ctx: &Context, g: &mut GoogleConnect, scope: &'static str) {
             browser.open_url(egui::OpenUrl::new_tab(url));
             browser.request_repaint();
         };
-        google::sign_in(&id, &secret, &[scope], &open, cancel).map(Some)
+        google::sign_in(&id, &secret, scope, &open, cancel).map(Some)
     });
     g.sign_in = Some((scope, task));
 }

@@ -178,7 +178,7 @@ pub fn window(ctx: &Context, app: &mut EditorApp) {
             return;
         }
 
-        crate::ui::google::account_line(ui, g);
+        crate::ui::google::account_line(ui, ctx, g, SCOPE_DRIVE);
         ui.label(format!("Uploads go to the \"{}\" folder in My Drive.", gdrive::FOLDER_NAME));
         ui.add_space(6.0);
         ui.add_enabled_ui(d.job.is_none(), |ui| {

@@ -181,7 +181,7 @@ fn token() -> Result<String> {
     if !a.can(SCOPE_CALENDAR) {
         bail!("connect Google Calendar first (File > 📅 Schedule content…)");
     }
-    google::access_token(&a)
+    google::access_token(&a, SCOPE_CALENDAR)
 }
 
 /// Adds the entry (every occurrence) to the primary calendar and returns the events.
