@@ -102,5 +102,7 @@ Then place them: `python -I .claude/skills/broll/broll.py place "$SB" "40=23,53=
    - no animation flaws.
 4. **Report:** the preview path, the cost (stills, redraws, animation, plus "N shots reused free"), the backups, and the frame check. Offer to redo a single flawed animation (≈ 13¢).
 
+**Deliver:** after a final re-export, offer to upload the video (and a project zip backup) to the user's Google Drive: see `/music-video` step 13.
+
 ## Text-only alternative
 For an abstract shot with no still to approve (smoke, light leaks, a city timelapse): `MV_STAGE=t2v MV_PROMPT_FILE=prompt.txt MV_SECONDS=6 [MV_DRY=1]`. It uses Kling by default. Do a dry run first: it prints the estimate. The video lands in `$D/RustCut AI/new shots/` for placing by hand in RustCut; it isn't added to the storyboard.

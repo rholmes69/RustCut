@@ -64,6 +64,15 @@ with `D="C:/Users/sales/Videos/RustCut AI/<Title> music video"`.
 11. **Check and report:** sample frames (`fps=1/20,tile=4x4`), confirm the video is as long as the song, send the video, and give the total cost with a breakdown. Suggest next steps: `/broll` for treatment-based cutaways (about 20¢ a shot),
 `/lip-sync` on close-up singing shots, `/reshoot` for weak cuts, and a 1080p export from RustCut.
 12. **Hand off:** if the user already has a project file elsewhere (e.g. `Downloads\<Title>.rcproj`), back it up as `<Title>.before-storyboard.rcproj`, then copy the finished `.rcproj` over it. The project must be closed in RustCut while you do this.
+13. **Deliver to Google Drive (free, offer it, don't do it unasked):** once the final 1080p export is checked, offer to put the video and a project backup on the user's Google Drive. Uploads land in a **RustCut** folder in My Drive; RustCut can only see the files it uploaded.
+    - **In the app (the usual way):**
+      - **File → ☁ Upload a video to Google Drive…** for the `.mp4`.
+      - **File → ☁ Upload project zip to Google Drive** for the whole project plus media. It packs the zip while uploading, so it needs **no free disk space**. Use it instead of Export project as zip when C: is nearly full.
+      - After an export, the export window has a **☁ Upload to Google Drive** button.
+      - **File → ☁ Google Drive…** shows progress, Cancel, and **Open in Google Drive / Copy link** when done.
+    - **From here, only when the user asks** (it uses their saved sign-in): `cd /c/Users/sales/MyVideoEditor && GDRIVE_LIVE="$D/<Title> - music video (1080p).mp4" CARGO_INCREMENTAL=0 cargo test --release --offline --lib gdrive_live -- --ignored --nocapture`. It prints progress and the Drive link. It uploads a file only; the project zip goes through the app.
+    - **Sign-in:** the user has connected their account (`%APPDATA%\RustCut\gdrive.json`; check with `grep -c '"refresh_token": "[^"]'`, never print it). If the upload says the sign-in expired, the consent screen is still in Testing (Google ends it after 7 days): ask the user to sign in again in **File → ☁ Google Drive…**, and suggest **Publish app** on Google's Audience page.
+    - Report the Drive link, not the file contents.
 
 ## Reference shots (tagged images)
 For a shot that needs specific references beyond the cast (an animal, a prop, a location), use Seedance 2.0 with tags instead of `newshot`: `@ImageN` is the N-th image given, max 9. Dry run first (free), then ask before spending (≈ 24¢/s fast, 30¢/s best):
@@ -78,3 +87,4 @@ Or the MCP tool `reference_shot {prompt, images, seconds, model, dry_run}`. fal'
 - The song can be longer than the lyrics suggest. Use the length from the prepare step.
 - Claude's desktop app runs commands inside a Windows app package that redirects `AppData\Roaming`. A stale shadow copy of RustCut's settings lived at `C:\Users\sales\AppData\Local\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\RustCut\` and hid the real `ai.json` until the user renamed it (to `ai.olc.json`). If keys look missing, check there first. Spending recorded from here may land in that folder's shadow `economics.sqlite` instead of the user's real one.
 - Microsoft Store Python sees yet another copy of AppData. Check settings with bash `grep -c`, not Python.
+- **Disk space:** C: is often nearly full. A failed export overwrites the old file with a broken one, so check `df -h /c` before a 1080p export (it needs about 1 GB free) and ask before deleting anything. To back a project up, prefer the Drive project-zip upload (step 13): it needs no local space.
