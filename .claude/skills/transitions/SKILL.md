@@ -88,4 +88,4 @@ Every transition's start and end, and every overlay fade edge, in ms from a beat
 
 Report: what was applied (grouped by kind), the check numbers, any cut you snapped and how, the backup name, and that the to-do list was restored. Offer the next polish (beat effects on the hook, the ending fix).
 
-**Deliver:** after a final re-export, offer to upload the video (and a project zip backup) to the user's Google Drive: see `/music-video` step 13.
+**Deliver:** after a final re-export, offer the user a Google Drive backup (video and project zip), a YouTube upload with the details filled in from the project, and a release plan on Google Calendar: see `/music-video` step 13. Ask before each; they act on the user's real accounts.

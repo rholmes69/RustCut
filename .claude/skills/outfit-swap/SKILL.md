@@ -79,4 +79,4 @@ Report:
 
 **Check the rest of the scene:** list the other shots in the same place or act (same setting words in their descriptions, or neighbouring slots). Name the ones that still show the old outfit, and offer to reshoot them the same way, with a price. Falling Deeper's penthouse scene was shots 7, 8 and 9: 8 shows only hands, and 9 still had the old outfit.
 
-**Deliver:** after a final re-export, offer to upload the video (and a project zip backup) to the user's Google Drive: see `/music-video` step 13.
+**Deliver:** after a final re-export, offer the user a Google Drive backup (video and project zip), a YouTube upload with the details filled in from the project, and a release plan on Google Calendar: see `/music-video` step 13. Ask before each; they act on the user's real accounts.

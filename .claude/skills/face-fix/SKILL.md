@@ -103,6 +103,6 @@ Flag any back-to-back cuts that now replay the same video from its start, and of
 
 If the shot is lip-synced, the new video has no sync. Offer `/lip-sync`, with a dry run first.
 
-**Deliver:** after a final re-export, offer to upload the video (and a project zip backup) to the user's Google Drive: see `/music-video` step 13.
+**Deliver:** after a final re-export, offer the user a Google Drive backup (video and project zip), a YouTube upload with the details filled in from the project, and a release plan on Google Calendar: see `/music-video` step 13. Ask before each; they act on the user's real accounts.
 
 **Fixing several shots:** do steps 2 and 3 for all of them in one redraw run (`MV_REDRAW="4,9,12"` with a `MV_DESC_N` for each), show one comparison sheet, then animate each one.

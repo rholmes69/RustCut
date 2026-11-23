@@ -69,3 +69,5 @@ For the user doing it by hand: right-click a clip → **👄 Lip-sync Studio…*
 3. **Generate:** the recommended method is starred; choose quality, Replace or On the track above, see the cost breakdown, then Generate. Afterwards, the **Takes** list swaps between the original and each result.
 
 The mini timeline shows the shot, the chosen face and the waveform with lyrics; drag the gold handles to trim the span. The older **👄 Lip-sync to dialogue (AI)…** item still works.
+
+**Deliver:** a finished lip-synced chorus makes a good teaser. After the final export, offer to schedule teaser posts on Google Calendar and the YouTube upload: see `/music-video` step 13.
