@@ -138,3 +138,5 @@ python -I $S run --project "$P" --still "<still.png>" --start <t> --end <t> --tr
 - **A lipsync-2 take needs no speed fix.** Its output is as long as the span, and the mouth is driven by the song. `fit` is for Seedance takes, and only works when the face stays fairly still. On the Last Night Kling take, the head tilted and turned and the scores were noise. Judge by the mouth frames and the preview instead.
 - **Moving the take later breaks the sync.** If someone drags it in RustCut, run `fit` again. A big recommended shift (over 0.5 s) means it was moved.
 - `run` and `apply` drive `target/release/rustcut-mcp.exe`. If it was rebuilt while locked, use the current one; the old copies are named `rustcut-mcp-old*.exe`.
+
+**Deliver:** a finished lip-synced chorus makes a good teaser. After the final export, offer to schedule teaser posts on Google Calendar and the YouTube upload: see `/music-video` step 13.

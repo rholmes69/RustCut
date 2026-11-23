@@ -26,4 +26,4 @@ Reshoot files go in `<project folder>/RustCut AI/reshoots/clip-<id>-<n>/`, outsi
 ## When the MCP server doesn't have `reshoot_clip`
 `rustcut-mcp.exe` predates the tool (it needs a rebuild, which isn't possible while RustCut, SonicLens or a Claude session is running it). Guide the user through the app instead: right-click the clip → **🎬 Reshoot this clip (AI)…** → edit the description and motion → **🎨 Draw new still** → **🎬 Animate & replace this clip**. Tick **Redo the lip-sync performance afterwards** when it appears.
 
-**Deliver:** after a final re-export, offer to upload the video (and a project zip backup) to the user's Google Drive: see `/music-video` step 13.
+**Deliver:** after a final re-export, offer the user a Google Drive backup (video and project zip), a YouTube upload with the details filled in from the project, and a release plan on Google Calendar: see `/music-video` step 13. Ask before each; they act on the user's real accounts.
