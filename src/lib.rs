@@ -17,6 +17,7 @@ pub mod playback;
 pub mod prefs;
 pub mod multicam;
 pub mod music;
+pub mod gdrive;
 pub mod package;
 pub mod reactive;
 pub mod recent;

@@ -95,6 +95,8 @@ pub fn show(ctx: &Context, app: &mut EditorApp) {
     let picture_gaps = app.project.picture_gaps(1.0);
     let mut close = false;
     let mut batch = false;
+    let mut to_drive: Option<std::path::PathBuf> = None;
+    let mut done_path: Option<std::path::PathBuf> = None;
     let dlg = &mut app.export;
 
     egui::Window::new(RichText::new("Export video").strong())
@@ -240,12 +242,16 @@ pub fn show(ctx: &Context, app: &mut EditorApp) {
                     ctx.request_repaint_after(std::time::Duration::from_millis(200));
                 }
                 Some((ExportState::Done(path), elapsed)) => {
+                    done_path = Some(path.clone());
                     ui.label(RichText::new("✅  Export complete").strong().color(theme::ACCENT).size(15.0));
                     ui.label(widgets::dim(format!("{} · {:.1}s", path.display(), elapsed.as_secs_f32())));
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         if ui.button("📂  Show in folder").clicked() {
                             crate::ui::library::reveal(&path);
+                        }
+                        if ui.button("☁  Upload to Google Drive").on_hover_text("Into the RustCut folder on your Google Drive").clicked() {
+                            to_drive = Some(path.clone());
                         }
                         if ui.button("Close").clicked() {
                             close = true;
@@ -302,6 +308,13 @@ pub fn show(ctx: &Context, app: &mut EditorApp) {
             preset: app.export.quality.preset().into(),
         };
         app.export.job = Some(ExportJob::start(app.project.clone(), settings, ctx.clone()));
+    }
+    if let Some(p) = done_path {
+        app.gdrive.last_export = Some(p);
+    }
+    if let Some(p) = to_drive {
+        crate::ui::gdrive::upload(app, crate::ui::gdrive::Upload::File(p));
+        app.gdrive.open = true;
     }
     if batch {
         app.export_queue.open = true;
