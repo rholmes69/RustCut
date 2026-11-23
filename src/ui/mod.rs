@@ -9,6 +9,7 @@ pub mod inspector;
 pub mod library;
 pub mod local_ai;
 pub mod lipsync_studio;
+pub mod gdrive;
 pub mod motion_graphics;
 pub mod music;
 pub mod preview;

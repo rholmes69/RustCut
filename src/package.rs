@@ -24,8 +24,9 @@ fn safe_name(name: &str) -> String {
     if s.trim().is_empty() { "file".into() } else { s }
 }
 
-/// Writes `project` and its media (and LUTs, thumbnail) to `dest`.
-pub fn export_zip(project: &Project, dest: &Path) -> Result<ExportReport> {
+/// The project with its paths rewritten to zip-relative names, plus the files to pack
+/// (source path, name inside the zip) in order.
+fn collect(project: &Project) -> (Project, Vec<(PathBuf, String)>, ExportReport) {
     let mut p = project.clone();
     let mut report = ExportReport::default();
     let mut names: HashMap<PathBuf, String> = HashMap::new();
@@ -65,6 +66,17 @@ pub fn export_zip(project: &Project, dest: &Path) -> Result<ExportReport> {
             }
         }
     }
+    (p, order, report)
+}
+
+/// Total bytes of the media a project zip would hold (for progress bars).
+pub fn media_bytes(project: &Project) -> u64 {
+    collect(project).1.iter().filter_map(|(src, _)| std::fs::metadata(src).ok()).map(|m| m.len()).sum()
+}
+
+/// Writes `project` and its media (and LUTs, thumbnail) to `dest`.
+pub fn export_zip(project: &Project, dest: &Path) -> Result<ExportReport> {
+    let (p, order, mut report) = collect(project);
 
     let tmp = dest.with_extension("zip.part");
     let result = (|| -> Result<()> {
@@ -93,6 +105,165 @@ pub fn export_zip(project: &Project, dest: &Path) -> Result<ExportReport> {
             let _ = std::fs::remove_file(&tmp);
             Err(e)
         }
+    }
+}
+
+/// Writes the same package as [`export_zip`] to a writer that can't seek (an upload), without
+/// a temporary file. Entries are stored (media is already compressed) with zip64 sizes and data
+/// descriptors, which every unzip tool and [`import_zip`] read. `progress` gets the media bytes
+/// written so far; when `keep_going` returns `false` it stops with an error.
+pub fn stream_zip<W: Write>(project: &Project, out: W, progress: &mut dyn FnMut(u64), keep_going: &dyn Fn() -> bool) -> Result<ExportReport> {
+    let (p, order, mut report) = collect(project);
+    let mut zw = StreamZip { out: CountingWriter { inner: out, written: 0 }, entries: Vec::new() };
+    zw.add(PROJECT_FILE, &mut serde_json::to_string_pretty(&p)?.as_bytes(), &mut |_| {}, keep_going)?;
+    let mut done = 0u64;
+    for (src, arc) in &order {
+        let mut f = std::fs::File::open(src).with_context(|| format!("reading {}", src.display()))?;
+        let base = done;
+        let n = zw.add(arc, &mut f, &mut |n| progress(base + n), keep_going)?;
+        done += n;
+        report.files += 1;
+    }
+    zw.finish()?;
+    Ok(report)
+}
+
+struct CountingWriter<W: Write> {
+    inner: W,
+    written: u64,
+}
+
+impl<W: Write> Write for CountingWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        self.written += n as u64;
+        Ok(n)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+struct Entry {
+    name: String,
+    crc: u32,
+    size: u64,
+    offset: u64,
+}
+
+struct StreamZip<W: Write> {
+    out: CountingWriter<W>,
+    entries: Vec<Entry>,
+}
+
+const ZIP64_VERSION: u16 = 45;
+/// Bit 3: sizes and CRC follow the data. Bit 11: names are UTF-8.
+const FLAGS: u16 = (1 << 3) | (1 << 11);
+/// 1980-01-01 00:00 in DOS time and date.
+const DOS_TIME_DATE: [u8; 4] = [0, 0, 0x21, 0];
+
+impl<W: Write> StreamZip<W> {
+    fn add(&mut self, name: &str, data: &mut dyn Read, progress: &mut dyn FnMut(u64), keep_going: &dyn Fn() -> bool) -> Result<u64> {
+        let offset = self.out.written;
+        let o = &mut self.out;
+        // Local header: sizes go in the zip64 extra (zeros here) and the descriptor.
+        o.write_all(&0x04034b50u32.to_le_bytes())?;
+        o.write_all(&ZIP64_VERSION.to_le_bytes())?;
+        o.write_all(&FLAGS.to_le_bytes())?;
+        o.write_all(&0u16.to_le_bytes())?; // stored
+        o.write_all(&DOS_TIME_DATE)?;
+        o.write_all(&0u32.to_le_bytes())?; // crc
+        o.write_all(&u32::MAX.to_le_bytes())?;
+        o.write_all(&u32::MAX.to_le_bytes())?;
+        o.write_all(&(name.len() as u16).to_le_bytes())?;
+        o.write_all(&20u16.to_le_bytes())?; // extra length
+        o.write_all(name.as_bytes())?;
+        o.write_all(&1u16.to_le_bytes())?;
+        o.write_all(&16u16.to_le_bytes())?;
+        o.write_all(&0u64.to_le_bytes())?;
+        o.write_all(&0u64.to_le_bytes())?;
+
+        let mut crc = crc32fast::Hasher::new();
+        let mut size = 0u64;
+        let mut buf = vec![0u8; 1 << 20];
+        loop {
+            if !keep_going() {
+                bail!("cancelled");
+            }
+            let n = data.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            crc.update(&buf[..n]);
+            o.write_all(&buf[..n])?;
+            size += n as u64;
+            progress(size);
+        }
+        let crc = crc.finalize();
+        // Zip64 data descriptor.
+        o.write_all(&0x08074b50u32.to_le_bytes())?;
+        o.write_all(&crc.to_le_bytes())?;
+        o.write_all(&size.to_le_bytes())?;
+        o.write_all(&size.to_le_bytes())?;
+        self.entries.push(Entry { name: name.to_string(), crc, size, offset });
+        Ok(size)
+    }
+
+    fn finish(mut self) -> Result<()> {
+        let cd_start = self.out.written;
+        let o = &mut self.out;
+        for e in &self.entries {
+            o.write_all(&0x02014b50u32.to_le_bytes())?;
+            o.write_all(&ZIP64_VERSION.to_le_bytes())?; // made by
+            o.write_all(&ZIP64_VERSION.to_le_bytes())?; // needed
+            o.write_all(&FLAGS.to_le_bytes())?;
+            o.write_all(&0u16.to_le_bytes())?;
+            o.write_all(&DOS_TIME_DATE)?;
+            o.write_all(&e.crc.to_le_bytes())?;
+            o.write_all(&u32::MAX.to_le_bytes())?;
+            o.write_all(&u32::MAX.to_le_bytes())?;
+            o.write_all(&(e.name.len() as u16).to_le_bytes())?;
+            o.write_all(&28u16.to_le_bytes())?; // extra length
+            o.write_all(&0u16.to_le_bytes())?; // comment
+            o.write_all(&0u16.to_le_bytes())?; // disk
+            o.write_all(&0u16.to_le_bytes())?; // internal attributes
+            o.write_all(&0u32.to_le_bytes())?; // external attributes
+            o.write_all(&u32::MAX.to_le_bytes())?; // offset: in the zip64 extra
+            o.write_all(e.name.as_bytes())?;
+            o.write_all(&1u16.to_le_bytes())?;
+            o.write_all(&24u16.to_le_bytes())?;
+            o.write_all(&e.size.to_le_bytes())?;
+            o.write_all(&e.size.to_le_bytes())?;
+            o.write_all(&e.offset.to_le_bytes())?;
+        }
+        let cd_end = o.written;
+        let n = self.entries.len() as u64;
+        // Zip64 end of central directory record, then its locator.
+        o.write_all(&0x06064b50u32.to_le_bytes())?;
+        o.write_all(&44u64.to_le_bytes())?;
+        o.write_all(&ZIP64_VERSION.to_le_bytes())?;
+        o.write_all(&ZIP64_VERSION.to_le_bytes())?;
+        o.write_all(&0u32.to_le_bytes())?;
+        o.write_all(&0u32.to_le_bytes())?;
+        o.write_all(&n.to_le_bytes())?;
+        o.write_all(&n.to_le_bytes())?;
+        o.write_all(&(cd_end - cd_start).to_le_bytes())?;
+        o.write_all(&cd_start.to_le_bytes())?;
+        o.write_all(&0x07064b50u32.to_le_bytes())?;
+        o.write_all(&0u32.to_le_bytes())?;
+        o.write_all(&cd_end.to_le_bytes())?;
+        o.write_all(&1u32.to_le_bytes())?;
+        // Classic end record, pointing at the zip64 one.
+        o.write_all(&0x06054b50u32.to_le_bytes())?;
+        o.write_all(&0u16.to_le_bytes())?;
+        o.write_all(&0u16.to_le_bytes())?;
+        o.write_all(&u16::MAX.to_le_bytes())?;
+        o.write_all(&u16::MAX.to_le_bytes())?;
+        o.write_all(&u32::MAX.to_le_bytes())?;
+        o.write_all(&u32::MAX.to_le_bytes())?;
+        o.write_all(&0u16.to_le_bytes())?;
+        o.flush()?;
+        Ok(())
     }
 }
 
@@ -180,6 +351,34 @@ mod tests {
         let q = Project::load(&manual.join(PROJECT_FILE)).unwrap();
         assert_eq!(q.media[0].path, manual.join("media").join("1-a.wav"));
         assert_eq!(std::fs::read(&q.media[0].path).unwrap(), b"hello audio");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn streamed_zip_reads_back() {
+        let dir = std::env::temp_dir().join(format!("rc-pkg-stream-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let big: Vec<u8> = (0..3_000_000u32).map(|i| (i % 251) as u8).collect();
+        std::fs::write(dir.join("clip.mp4"), &big).unwrap();
+        std::fs::write(dir.join("song é.wav"), b"hello audio").unwrap();
+        let mut p = Project::default();
+        p.name = "Streamed".into();
+        p.media.push(MediaItem { id: 1, path: dir.join("clip.mp4"), name: "clip.mp4".into(), kind: MediaKind::Video, duration: 1.0, width: 2, height: 2, fps: 30.0, has_audio: false });
+        p.media.push(MediaItem { id: 2, path: dir.join("song é.wav"), name: "song.wav".into(), kind: MediaKind::Audio, duration: 1.0, width: 0, height: 0, fps: 0.0, has_audio: true });
+        let mut bytes = Vec::new();
+        let mut last = 0;
+        let r = stream_zip(&p, &mut bytes, &mut |n| last = n, &|| true).unwrap();
+        assert_eq!(r.files, 2);
+        assert_eq!(last, media_bytes(&p));
+        let zip = dir.join("streamed.zip");
+        std::fs::write(&zip, &bytes).unwrap();
+        let proj = import_zip(&zip, &dir.join("unpacked")).unwrap();
+        let q = Project::load(&proj).unwrap();
+        assert_eq!(std::fs::read(&q.media[0].path).unwrap(), big);
+        assert_eq!(std::fs::read(&q.media[1].path).unwrap(), b"hello audio");
+        // Stopping early is an error, not a half-written "success".
+        assert!(stream_zip(&p, std::io::sink(), &mut |_| {}, &|| false).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

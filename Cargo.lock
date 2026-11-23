@@ -3034,6 +3034,7 @@ dependencies = [
  "ab_glyph",
  "anyhow",
  "cpal",
+ "crc32fast",
  "eframe",
  "egui",
  "rfd",

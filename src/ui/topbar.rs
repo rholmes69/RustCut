@@ -82,6 +82,19 @@ pub fn show(ctx: &Context, app: &mut EditorApp) {
                         ui.close_menu();
                     }
                     ui.separator();
+                    if ui.button("☁ Upload project zip to Google Drive").on_hover_text("The project and all its media, zipped on the way up (no local copy needed)").clicked() {
+                        crate::ui::gdrive::upload(app, crate::ui::gdrive::Upload::Project);
+                        ui.close_menu();
+                    }
+                    if ui.button("☁ Upload a video to Google Drive…").clicked() {
+                        crate::ui::gdrive::pick_and_upload(app);
+                        ui.close_menu();
+                    }
+                    if ui.button("☁ Google Drive…").on_hover_text("Connect your Google account and see uploads").clicked() {
+                        crate::ui::gdrive::open_window(app);
+                        ui.close_menu();
+                    }
+                    ui.separator();
                     if ui.button("Import media…           Ctrl+I").clicked() {
                         app.import_dialog();
                         ui.close_menu();
