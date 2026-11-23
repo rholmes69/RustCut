@@ -78,6 +78,10 @@ pub struct EditorApp {
     pub scene_todos: ui::scene_todos::SceneTodosUi,
     pub motion_graphics: ui::motion_graphics::MotionGraphicsUi,
     pub gdrive: ui::gdrive::DriveUi,
+    pub google: ui::google::GoogleConnect,
+    pub youtube: ui::youtube::YouTubeUi,
+    /// The last video exported in this session, offered for uploading.
+    pub last_export: Option<PathBuf>,
     pub lipsync_studio: ui::lipsync_studio::LipSyncStudioUi,
     pub brand_kit: ui::brand_kit::BrandKitUi,
     pub toast: Option<Toast>,
@@ -138,6 +142,9 @@ impl EditorApp {
             scene_todos: Default::default(),
             motion_graphics: Default::default(),
             gdrive: Default::default(),
+            google: Default::default(),
+            youtube: Default::default(),
+            last_export: None,
             lipsync_studio: Default::default(),
             brand_kit: Default::default(),
             toast: None,
@@ -956,7 +963,9 @@ impl eframe::App for EditorApp {
         ui::export_queue::poll(ctx, self);
         ui::review::poll(self);
         ui::motion_graphics::poll(self);
+        ui::google::poll(self);
         ui::gdrive::poll(ctx, self);
+        ui::youtube::poll(self);
         ui::lipsync_studio::poll(self, ctx);
         ui::color::poll_scopes(ctx, self);
         self.handle_shortcuts(ctx);
@@ -989,6 +998,7 @@ impl eframe::App for EditorApp {
         ui::scene_todos::window(ctx, self);
         ui::motion_graphics::window(ctx, self);
         ui::gdrive::window(ctx, self);
+        ui::youtube::window(ctx, self);
         ui::lipsync_studio::window(ctx, self);
 
         self.handle_dropped_files(ctx);

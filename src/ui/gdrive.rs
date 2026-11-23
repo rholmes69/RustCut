@@ -1,21 +1,14 @@
 //! Google Drive window (File → ☁ Google Drive…): connect a Google account once, then upload
 //! exported videos and whole projects (as a zip streamed straight to Drive) into a "RustCut"
-//! folder on My Drive. See `crate::gdrive`.
+//! folder on My Drive. See `crate::gdrive`; the sign-in panel is `crate::ui::google`.
 
 use crate::app::EditorApp;
-use crate::gdrive::{self, Settings, Uploaded};
+use crate::gdrive::{self, Uploaded};
+use crate::google::SCOPE_DRIVE;
 use crate::task::{Task, TaskState};
 use crate::ui::widgets;
-use egui::{Context, RichText, TextEdit};
+use egui::{Context, RichText};
 use std::path::PathBuf;
-
-const SETUP_HELP: &str = "One-time setup (about 5 minutes, free):\n\
-1. Go to console.cloud.google.com and create a project (any name, e.g. RustCut).\n\
-2. APIs & Services → Library → enable the Google Drive API.\n\
-3. OAuth consent screen (Google Auth Platform): External, add your own Google address as a test user.\n\
-4. Clients → Create client → Application type: Desktop app → Create, then Download JSON.\n\
-5. Click Load client file… below and pick that JSON (or paste the id and secret).\n\
-Tip: while the consent screen is in Testing, Google ends the sign-in after 7 days. Click Publish app on the Audience page to stay signed in; RustCut only asks for access to the files it uploads.";
 
 #[derive(Clone)]
 pub enum Upload {
@@ -25,17 +18,9 @@ pub enum Upload {
     Project,
 }
 
+#[derive(Default)]
 pub struct DriveUi {
     pub open: bool,
-    /// The last video exported in this session, offered as a one-click upload.
-    pub last_export: Option<PathBuf>,
-    settings: Option<Settings>,
-    client_id: String,
-    client_secret: String,
-    show_secret: bool,
-    sign_in: Option<Task<Settings>>,
-    /// The consent page, shown as a link in case the browser didn't open.
-    sign_in_url: std::sync::Arc<std::sync::Mutex<String>>,
     /// Waiting to start (after sign-in, or on the next frame).
     pending: Option<Upload>,
     job: Option<(String, Task<(Uploaded, usize)>)>,
@@ -43,46 +28,16 @@ pub struct DriveUi {
     error: Option<String>,
 }
 
-impl Default for DriveUi {
-    fn default() -> Self {
-        Self {
-            open: false,
-            last_export: None,
-            settings: None,
-            client_id: String::new(),
-            client_secret: String::new(),
-            show_secret: false,
-            sign_in: None,
-            sign_in_url: Default::default(),
-            pending: None,
-            job: None,
-            last: None,
-            error: None,
-        }
-    }
-}
-
 impl DriveUi {
     pub fn busy(&self) -> bool {
         self.job.is_some()
-    }
-
-    fn settings(&mut self) -> &Settings {
-        if self.settings.is_none() {
-            let s = gdrive::load();
-            self.client_id = s.client_id.clone();
-            self.client_secret = s.client_secret.clone();
-            self.settings = Some(s);
-        }
-        self.settings.as_ref().unwrap()
     }
 }
 
 /// Starts an upload, or opens the window to connect first and uploads after sign-in.
 pub fn upload(app: &mut EditorApp, what: Upload) {
-    let d = &mut app.gdrive;
-    if d.job.is_some() {
-        d.open = true;
+    if app.gdrive.job.is_some() {
+        app.gdrive.open = true;
         app.notify_error("A Google Drive upload is already running");
         return;
     }
@@ -92,27 +47,32 @@ pub fn upload(app: &mut EditorApp, what: Upload) {
             return;
         }
     }
+    let d = &mut app.gdrive;
     d.error = None;
     d.last = None;
     d.pending = Some(what);
-    if !d.settings().connected() {
-        d.open = true;
+    if !app.google.can(SCOPE_DRIVE) {
+        app.gdrive.open = true;
     }
 }
 
 /// File → Upload a video to Google Drive…: pick any file, starting in the project's folder.
 pub fn pick_and_upload(app: &mut EditorApp) {
-    let mut dlg = rfd::FileDialog::new().set_title("Upload a video to Google Drive").add_filter("Video", &["mp4", "mov", "m4v", "webm", "mkv", "gif"]).add_filter("Any file", &["*"]);
-    if let Some(dir) = app.project_path.as_deref().and_then(|p| p.parent()) {
-        dlg = dlg.set_directory(dir);
-    }
-    if let Some(path) = dlg.pick_file() {
+    if let Some(path) = pick_video(app, "Upload a video to Google Drive") {
         upload(app, Upload::File(path));
     }
 }
 
+/// A file dialog for a video, starting next to the project.
+pub fn pick_video(app: &EditorApp, title: &str) -> Option<PathBuf> {
+    let mut dlg = rfd::FileDialog::new().set_title(title).add_filter("Video", &["mp4", "mov", "m4v", "webm", "mkv", "gif"]).add_filter("Any file", &["*"]);
+    if let Some(dir) = app.last_export.as_deref().and_then(|p| p.parent()).or_else(|| app.project_path.as_deref().and_then(|p| p.parent())) {
+        dlg = dlg.set_directory(dir);
+    }
+    dlg.pick_file()
+}
+
 pub fn open_window(app: &mut EditorApp) {
-    app.gdrive.settings();
     app.gdrive.open = true;
 }
 
@@ -123,26 +83,12 @@ fn zip_name(project_name: &str) -> String {
 }
 
 pub fn poll(ctx: &Context, app: &mut EditorApp) {
-    // Sign-in finished?
-    if let Some(state) = app.gdrive.sign_in.as_ref().and_then(|t| t.take_finished()) {
-        let d = &mut app.gdrive;
-        d.sign_in = None;
-        match state {
-            TaskState::Done(s) => {
-                d.settings = Some(s.clone());
-                let who = if s.email.is_empty() { "Google Drive".to_string() } else { s.email.clone() };
-                app.notify(format!("Connected to {who}"));
-            }
-            TaskState::Failed(e) => {
-                d.error = Some(e);
-                d.pending = None;
-            }
-            _ => d.pending = None,
-        }
+    // A sign-in that ended without Drive access drops the waiting upload.
+    if app.gdrive.pending.is_some() && !app.google.signing_in() && app.google.error.is_some() && !app.google.can(SCOPE_DRIVE) {
+        app.gdrive.pending = None;
     }
-
     // Start a waiting upload once signed in.
-    let ready = app.gdrive.job.is_none() && app.gdrive.sign_in.is_none() && app.gdrive.pending.is_some() && app.gdrive.settings().connected();
+    let ready = app.gdrive.job.is_none() && app.gdrive.pending.is_some() && !app.google.signing_in() && app.google.can(SCOPE_DRIVE);
     if ready {
         let what = app.gdrive.pending.take().unwrap();
         let (label, task) = match what {
@@ -168,7 +114,7 @@ pub fn poll(ctx: &Context, app: &mut EditorApp) {
                 if missing > 0 {
                     app.notify_error(format!("Uploaded {} to Google Drive — {missing} missing media file(s) were left out", u.name));
                 } else {
-                    app.notify(format!("Uploaded {} ({}) to Google Drive → {}", u.name, gdrive::size_label(u.size), gdrive::FOLDER_NAME));
+                    app.notify(format!("Uploaded {} ({}) to Google Drive > {}", u.name, gdrive::size_label(u.size), gdrive::FOLDER_NAME));
                 }
                 app.gdrive.last = Some(u);
             }
@@ -176,6 +122,7 @@ pub fn poll(ctx: &Context, app: &mut EditorApp) {
                 app.notify_error(format!("Google Drive upload of {label} failed: {e}"));
                 app.gdrive.error = Some(e);
                 app.gdrive.open = true;
+                app.google.reload();
             }
             _ => app.notify(format!("Cancelled the upload of {label}")),
         }
@@ -187,12 +134,11 @@ pub fn window(ctx: &Context, app: &mut EditorApp) {
         return;
     }
     let mut open = true;
-    let last_export = app.gdrive.last_export.clone().filter(|p| p.is_file());
+    let last_export = app.last_export.clone().filter(|p| p.is_file());
     let mut upload_req: Option<Upload> = None;
     let mut pick = false;
     egui::Window::new(RichText::new("☁ Google Drive").strong()).id(egui::Id::new("gdrive")).open(&mut open).default_width(460.0).show(ctx, |ui| {
-        let d = &mut app.gdrive;
-        let s = d.settings().clone();
+        let (d, g) = (&mut app.gdrive, &mut app.google);
 
         if let Some(e) = &d.error {
             ui.colored_label(crate::ui::theme::DANGER, e);
@@ -223,101 +169,33 @@ pub fn window(ctx: &Context, app: &mut EditorApp) {
             ui.separator();
         }
 
-        if s.connected() {
-            let who = if s.email.is_empty() { "your Google account".to_string() } else { s.email.clone() };
-            ui.label(format!("Connected to {who}. Uploads go to the \"{}\" folder in My Drive.", gdrive::FOLDER_NAME));
-            ui.add_space(6.0);
-            ui.add_enabled_ui(d.job.is_none(), |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    if let Some(path) = last_export.clone() {
-                        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                        if ui.button(format!("🎬 Upload {name}")).on_hover_text(path.display().to_string()).clicked() {
-                            upload_req = Some(Upload::File(path));
-                        }
-                    }
-                    if ui.button("🎬 Upload a video…").clicked() {
-                        pick = true;
-                    }
-                    if ui.button("📦 Upload project as zip").on_hover_text("The project and all its media, packed as a zip on the way up — no local copy, no extra disk space").clicked() {
-                        upload_req = Some(Upload::Project);
-                    }
-                });
-            });
-            ui.add_space(6.0);
-            if ui.small_button("Disconnect").on_hover_text("Forget this Google account on this computer").clicked() {
-                match gdrive::sign_out() {
-                    Ok(s) => d.settings = Some(s),
-                    Err(e) => d.error = Some(format!("{e:#}")),
-                }
+        if !g.can(SCOPE_DRIVE) {
+            if d.pending.is_some() {
+                ui.label(RichText::new("Connect your Google account to start the upload.").strong());
+                ui.add_space(4.0);
             }
+            crate::ui::google::connect_ui(ui, ctx, g, SCOPE_DRIVE);
             return;
         }
 
-        if d.pending.is_some() {
-            ui.label(RichText::new("Connect your Google account to start the upload.").strong());
-            ui.add_space(4.0);
-        }
-        if let Some(job) = &d.sign_in {
-            ui.horizontal(|ui| {
-                ui.spinner();
-                ui.label("Waiting for you to allow access in the browser…");
-            });
-            let url = d.sign_in_url.lock().unwrap().clone();
-            if !url.is_empty() {
-                ui.hyperlink_to("The browser didn't open? Click here.", url);
-            }
-            if ui.button("Cancel").clicked() {
-                job.cancel();
-            }
-            ctx.request_repaint_after(std::time::Duration::from_millis(250));
-            return;
-        }
-
-        ui.collapsing("How to get a client id (one time)", |ui| {
-            ui.label(widgets::dim(SETUP_HELP));
-            ui.hyperlink_to("Open Google Cloud Console", "https://console.cloud.google.com/auth/clients");
-        });
-        ui.add_space(4.0);
-        egui::Grid::new("gdrive-client").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
-            ui.label("Client id");
-            ui.add(TextEdit::singleline(&mut d.client_id).desired_width(300.0).hint_text("…apps.googleusercontent.com"));
-            ui.end_row();
-            ui.label("Client secret");
-            ui.horizontal(|ui| {
-                ui.add(TextEdit::singleline(&mut d.client_secret).password(!d.show_secret).desired_width(240.0));
-                ui.checkbox(&mut d.show_secret, "Show");
-            });
-            ui.end_row();
-        });
-        ui.horizontal(|ui| {
-            if ui.button("Load client file…").on_hover_text("The JSON Google Cloud Console downloads for a Desktop app client").clicked() {
-                if let Some(path) = rfd::FileDialog::new().add_filter("OAuth client JSON", &["json"]).pick_file() {
-                    match std::fs::read_to_string(&path).map_err(anyhow::Error::from).and_then(|j| gdrive::parse_client_file(&j)) {
-                        Ok((id, secret)) => {
-                            d.client_id = id;
-                            d.client_secret = secret;
-                            d.error = None;
-                        }
-                        Err(e) => d.error = Some(format!("{e:#}")),
+        crate::ui::google::account_line(ui, g);
+        ui.label(format!("Uploads go to the \"{}\" folder in My Drive.", gdrive::FOLDER_NAME));
+        ui.add_space(6.0);
+        ui.add_enabled_ui(d.job.is_none(), |ui| {
+            ui.horizontal_wrapped(|ui| {
+                if let Some(path) = last_export.clone() {
+                    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    if ui.button(format!("🎬 Upload {name}")).on_hover_text(path.display().to_string()).clicked() {
+                        upload_req = Some(Upload::File(path));
                     }
                 }
-            }
-            let ready = !d.client_id.trim().is_empty() && !d.client_secret.trim().is_empty();
-            if ui.add_enabled(ready, egui::Button::new(RichText::new("Sign in with Google").strong())).clicked() {
-                d.error = None;
-                let (id, secret) = (d.client_id.trim().to_string(), d.client_secret.trim().to_string());
-                let url_slot = d.sign_in_url.clone();
-                url_slot.lock().unwrap().clear();
-                let browser = ctx.clone();
-                d.sign_in = Some(Task::spawn(ctx.clone(), move |cancel, _| {
-                    let open = |url: &str| {
-                        *url_slot.lock().unwrap() = url.to_string();
-                        browser.open_url(egui::OpenUrl::new_tab(url));
-                        browser.request_repaint();
-                    };
-                    gdrive::sign_in(&id, &secret, &open, cancel).map(Some)
-                }));
-            }
+                if ui.button("🎬 Upload a video…").clicked() {
+                    pick = true;
+                }
+                if ui.button("📦 Upload project as zip").on_hover_text("The project and all its media, packed as a zip on the way up — no local copy, no extra disk space").clicked() {
+                    upload_req = Some(Upload::Project);
+                }
+            });
         });
     });
     if !open {

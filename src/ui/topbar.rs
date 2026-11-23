@@ -90,6 +90,10 @@ pub fn show(ctx: &Context, app: &mut EditorApp) {
                         crate::ui::gdrive::pick_and_upload(app);
                         ui.close_menu();
                     }
+                    if ui.button("▶ Upload to YouTube…").on_hover_text("Upload a video with title, description, tags, audience, visibility or a scheduled premiere, and thumbnail").clicked() {
+                        crate::ui::youtube::open_for(app, None);
+                        ui.close_menu();
+                    }
                     if ui.button("☁ Google Drive…").on_hover_text("Connect your Google account and see uploads").clicked() {
                         crate::ui::gdrive::open_window(app);
                         ui.close_menu();

@@ -96,6 +96,7 @@ pub fn show(ctx: &Context, app: &mut EditorApp) {
     let mut close = false;
     let mut batch = false;
     let mut to_drive: Option<std::path::PathBuf> = None;
+    let mut to_youtube: Option<std::path::PathBuf> = None;
     let mut done_path: Option<std::path::PathBuf> = None;
     let dlg = &mut app.export;
 
@@ -253,6 +254,9 @@ pub fn show(ctx: &Context, app: &mut EditorApp) {
                         if ui.button("☁  Upload to Google Drive").on_hover_text("Into the RustCut folder on your Google Drive").clicked() {
                             to_drive = Some(path.clone());
                         }
+                        if ui.button("▶  Upload to YouTube").on_hover_text("Title, description, tags, audience, visibility and thumbnail, filled in from the project").clicked() {
+                            to_youtube = Some(path.clone());
+                        }
                         if ui.button("Close").clicked() {
                             close = true;
                         }
@@ -310,11 +314,14 @@ pub fn show(ctx: &Context, app: &mut EditorApp) {
         app.export.job = Some(ExportJob::start(app.project.clone(), settings, ctx.clone()));
     }
     if let Some(p) = done_path {
-        app.gdrive.last_export = Some(p);
+        app.last_export = Some(p);
     }
     if let Some(p) = to_drive {
         crate::ui::gdrive::upload(app, crate::ui::gdrive::Upload::File(p));
         app.gdrive.open = true;
+    }
+    if let Some(p) = to_youtube {
+        crate::ui::youtube::open_for(app, Some(p));
     }
     if batch {
         app.export_queue.open = true;
