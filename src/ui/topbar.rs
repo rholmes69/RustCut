@@ -94,6 +94,10 @@ pub fn show(ctx: &Context, app: &mut EditorApp) {
                         crate::ui::youtube::open_for(app, None);
                         ui.close_menu();
                     }
+                    if ui.button("📅 Schedule content…").on_hover_text("Put release days, premieres and posting slots on your Google Calendar with reminders").clicked() {
+                        crate::ui::calendar::open(app);
+                        ui.close_menu();
+                    }
                     if ui.button("☁ Google Drive…").on_hover_text("Connect your Google account and see uploads").clicked() {
                         crate::ui::gdrive::open_window(app);
                         ui.close_menu();

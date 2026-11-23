@@ -1,5 +1,6 @@
 pub mod ai;
 pub mod brand_kit;
+pub mod calendar;
 pub mod captions;
 pub mod economics;
 pub mod export_dialog;

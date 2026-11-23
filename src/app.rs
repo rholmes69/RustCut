@@ -80,6 +80,7 @@ pub struct EditorApp {
     pub gdrive: ui::gdrive::DriveUi,
     pub google: ui::google::GoogleConnect,
     pub youtube: ui::youtube::YouTubeUi,
+    pub calendar: ui::calendar::CalendarUi,
     /// The last video exported in this session, offered for uploading.
     pub last_export: Option<PathBuf>,
     pub lipsync_studio: ui::lipsync_studio::LipSyncStudioUi,
@@ -144,6 +145,7 @@ impl EditorApp {
             gdrive: Default::default(),
             google: Default::default(),
             youtube: Default::default(),
+            calendar: Default::default(),
             last_export: None,
             lipsync_studio: Default::default(),
             brand_kit: Default::default(),
@@ -966,6 +968,7 @@ impl eframe::App for EditorApp {
         ui::google::poll(self);
         ui::gdrive::poll(ctx, self);
         ui::youtube::poll(self);
+        ui::calendar::poll(self);
         ui::lipsync_studio::poll(self, ctx);
         ui::color::poll_scopes(ctx, self);
         self.handle_shortcuts(ctx);
@@ -999,6 +1002,7 @@ impl eframe::App for EditorApp {
         ui::motion_graphics::window(ctx, self);
         ui::gdrive::window(ctx, self);
         ui::youtube::window(ctx, self);
+        ui::calendar::window(ctx, self);
         ui::lipsync_studio::window(ctx, self);
 
         self.handle_dropped_files(ctx);

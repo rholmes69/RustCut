@@ -89,6 +89,7 @@ pub fn window(ctx: &Context, app: &mut EditorApp) {
     }
     let mut open = true;
     let mut refill = false;
+    let mut to_calendar: Option<crate::calendar::Entry> = None;
     let mut pick_video = false;
     let project = app.project.clone();
     egui::Window::new(RichText::new("▶ Upload to YouTube").strong()).id(egui::Id::new("youtube")).open(&mut open).default_width(560.0).default_height(680.0).show(ctx, |ui| {
@@ -140,6 +141,13 @@ pub fn window(ctx: &Context, app: &mut EditorApp) {
                 }
                 if ui.button("Upload another").clicked() {
                     another = true;
+                }
+            });
+            ui.horizontal(|ui| {
+                let premiere = d.visibility == Visibility::Scheduled;
+                let label = if premiere { "📅 Add the premiere to my calendar" } else { "📅 Schedule posts about it" };
+                if ui.button(label).on_hover_text("Opens Schedule content with this video's link filled in").clicked() {
+                    to_calendar = Some(calendar_entry(p, d, &project.name));
                 }
             });
         }
@@ -333,6 +341,9 @@ pub fn window(ctx: &Context, app: &mut EditorApp) {
     if !open {
         app.youtube.open = false;
     }
+    if let Some(entry) = to_calendar {
+        crate::ui::calendar::open_with(app, entry);
+    }
     if refill {
         app.youtube.details = youtube::suggest(&app.project, &app.youtube.details);
         app.youtube.filled_for = Some(app.project.name.clone());
@@ -341,5 +352,44 @@ pub fn window(ctx: &Context, app: &mut EditorApp) {
         if let Some(p) = crate::ui::gdrive::pick_video(app, "Choose the video to upload to YouTube") {
             app.youtube.video = Some(p);
         }
+    }
+}
+
+/// A calendar entry for an uploaded video: the premiere itself when it's scheduled, otherwise
+/// a "share it" slot tomorrow evening.
+pub fn calendar_entry(p: &Published, d: &Details, project: &str) -> crate::calendar::Entry {
+    let mut e = crate::calendar::Entry { link: p.watch_url(), project: project.to_string(), platform: "YouTube".into(), ..Default::default() };
+    match LocalTime::parse(&d.publish_at).ok().filter(|_| d.visibility == Visibility::Scheduled) {
+        Some(t) => {
+            e.title = format!("Premiere: {}", p.title);
+            e.platform = "Release / premiere".into();
+            e.start = t.to_input();
+            e.reminder = Some(60);
+            e.notes = "Goes public on YouTube. Share the link when it's live.".into();
+        }
+        None => {
+            e.title = format!("Share \"{}\"", p.title);
+            let now = LocalTime::from_unix(localtime::now_unix());
+            e.start = LocalTime { hour: 18, minute: 0, ..now.plus_days(1) }.to_input();
+        }
+    }
+    e
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn premiere_goes_on_the_calendar() {
+        let p = Published { id: "abc".into(), title: "Falling Deeper".into(), status: "uploaded".into(), warnings: vec![] };
+        let d = Details { visibility: Visibility::Scheduled, publish_at: "2030-05-01 18:00".into(), ..Default::default() };
+        let e = calendar_entry(&p, &d, "Falling Deeper - lyric video");
+        assert_eq!(e.title, "Premiere: Falling Deeper");
+        assert_eq!(e.start, "2030-05-01 18:00");
+        assert_eq!(e.link, "https://youtu.be/abc");
+        assert!(crate::calendar::validate(&e, 1_795_000_000).is_empty());
+        let e = calendar_entry(&p, &Details::default(), "x");
+        assert!(e.title.starts_with("Share") && e.platform == "YouTube");
     }
 }
