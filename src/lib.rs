@@ -7,6 +7,7 @@ pub mod brand_kit;
 pub mod captions;
 pub mod economics;
 pub mod export;
+pub mod gdrive;
 pub mod history;
 pub mod mcp;
 pub mod lyrics;

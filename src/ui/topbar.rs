@@ -81,6 +81,10 @@ pub fn show(ctx: &Context, app: &mut EditorApp) {
                         app.import_zip_dialog();
                         ui.close_menu();
                     }
+                    if ui.button("☁ Download project from Google Drive…").on_hover_text("Paste a Drive share link to a project .zip").clicked() {
+                        app.gdrive.open = true;
+                        ui.close_menu();
+                    }
                     ui.separator();
                     if ui.button("Import media…           Ctrl+I").clicked() {
                         app.import_dialog();
