@@ -7,6 +7,8 @@ description: Make a complete AI music video in RustCut from a song, lyrics and a
 
 Proven on "Checklist", "Under The Influence", "Bond Money" and "Last Night" (about 3.70 USD–5.20 each). Last Night's full making-of, including a `theme.txt` to copy, is in `Videos\RustCut AI\Last Night music video\WORKFLOW - making of Last Night.md`.
 
+For the whole production (story re-cut, b-roll, transitions, intro and outro cards with the logo, and a matching lyric video), follow `/music-video-production`, which uses this skill for the plan, stills and animation.
+
 ## Rules (always)
 - **Ask before spending money.** Give an estimate first, and stop after the stills so the user can review them before animating.
 - **Never print API keys** (OpenRouter, ElevenLabs, fal.ai). Check presence or length only.

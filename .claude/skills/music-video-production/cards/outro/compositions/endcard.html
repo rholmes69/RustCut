@@ -1,0 +1,91 @@
+<template>
+  <style>
+    #root {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 30px;
+    }
+    #end-shafts {
+      position: absolute;
+      left: 50%;
+      top: -200px;
+      width: 2400px;
+      height: 1500px;
+      margin-left: -1200px;
+      background:
+        linear-gradient(100deg, rgba(255, 90, 215, 0) 38%, rgba(255, 110, 225, 0.14) 42%, rgba(255, 90, 215, 0) 46%),
+        linear-gradient(80deg, rgba(80, 230, 255, 0) 50%, rgba(110, 235, 255, 0.12) 54%, rgba(80, 230, 255, 0) 58%),
+        linear-gradient(94deg, rgba(255, 90, 215, 0) 60%, rgba(255, 120, 230, 0.1) 63%, rgba(255, 90, 215, 0) 66%),
+        radial-gradient(ellipse 900px 380px at 50% 8%, rgba(150, 110, 255, 0.4), rgba(80, 230, 255, 0) 70%);
+    }
+    #end-lines {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+    }
+    .end-line {
+      font-family: "Playfair Display", serif;
+      font-weight: 400;
+      font-size: 104px;
+      line-height: 1.04;
+      color: var(--ink);
+      text-shadow: 0 0 40px rgba(255, 90, 215, 0.35);
+      white-space: nowrap;
+    }
+    #end-artist {
+      font-family: "Montserrat", sans-serif;
+      font-weight: 700;
+      font-size: 32px;
+      letter-spacing: 0.62em;
+      padding-left: 0.62em;
+      color: var(--gold);
+      text-shadow: 0 0 20px rgba(255, 90, 215, 0.6);
+    }
+    #end-credit {
+      font-family: "Montserrat", sans-serif;
+      font-weight: 400;
+      font-size: 28px;
+      letter-spacing: 0.32em;
+      padding-left: 0.32em;
+      color: rgba(245, 232, 214, 0.72);
+    }
+    #end-black {
+      position: absolute;
+      inset: 0;
+      background: #000;
+    }
+  </style>
+  <div id="root" data-composition-id="endcard" data-width="1920" data-height="1080">
+    <div id="end-shafts" class="clip" data-start="0" data-duration="10"></div>
+    <div id="end-lines" class="clip" data-start="0.6" data-duration="4.9">
+      <div id="end-line1" class="end-line" data-var-text="title1">MidNight</div>
+      <div id="end-line2" class="end-line" data-var-text="title2">Kiss</div>
+    </div>
+    <div id="end-artist" class="clip" data-start="1.6" data-duration="3.9" data-var-text="artist">AIDAN B.</div>
+    <div id="end-credit" class="clip" data-start="2.4" data-duration="3.1" data-var-text="credit">with Aishyla</div>
+    <div id="end-black" class="clip" data-start="0" data-duration="10"></div>
+  </div>
+  <script>
+    const tl = gsap.timeline({ paused: true });
+    // Opens on black (the music video ends in a dip to white and a fade out), then the
+    // warm light rises like breaking the surface.
+    tl.fromTo("#end-black", { opacity: 1 }, { opacity: 0, duration: 1.4, ease: "power1.out" }, 0);
+    tl.fromTo("#end-shafts", { opacity: 0, y: 120 }, { opacity: 1, y: 0, duration: 3.2, ease: "power2.out" }, 0.2);
+    // Title rises up into place, the reverse of the intro's fall.
+    tl.fromTo("#end-line1", { opacity: 0, y: 46, filter: "blur(12px)" }, { opacity: 1, y: 0, filter: "blur(0px)", duration: 1.6, ease: "power2.out" }, 0.6);
+    tl.fromTo("#end-line2", { opacity: 0, y: 46, filter: "blur(12px)" }, { opacity: 1, y: 0, filter: "blur(0px)", duration: 1.6, ease: "power2.out" }, 0.95);
+    tl.fromTo("#end-artist", { opacity: 0, y: 24, filter: "blur(8px)" }, { opacity: 1, y: 0, filter: "blur(0px)", duration: 1.2, ease: "power3.out" }, 1.6);
+    tl.fromTo("#end-credit", { opacity: 0, y: 16 }, { opacity: 1, y: 0, duration: 1.0, ease: "power2.out" }, 2.4);
+    // Slow upward drift while it holds, then everything fades to black.
+    tl.to("#end-lines", { y: -18, duration: 2.0, ease: "none" }, 2.6);
+    // The title clears for the Ready Rock Media logo, then everything fades to black.
+    tl.to(["#end-lines", "#end-artist", "#end-credit"], { opacity: 0, y: -30, filter: "blur(10px)", duration: 0.7, ease: "power2.in", stagger: 0.06 }, 4.65);
+    tl.to("#end-black", { opacity: 1, duration: 1.3, ease: "power1.in" }, 8.55);
+    window.__timelines["endcard"] = tl;
+  </script>
+</template>
