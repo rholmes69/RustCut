@@ -1,0 +1,91 @@
+<!doctype html>
+<html
+  lang="en"
+  data-composition-variables='[
+    {"id":"artist","type":"string","label":"Artist","default":"AIDAN B."},
+    {"id":"title1","type":"string","label":"Title line 1","default":"MidNight"},
+    {"id":"title2","type":"string","label":"Title line 2","default":"Kiss"},
+    {"id":"accent","type":"color","label":"Accent (artist name)","default":"#FF5FD2"},
+    {"id":"ink","type":"color","label":"Title colour","default":"#F5F0E8"}
+  ]'
+>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1920, height=1080" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.15.0/dist/gsap.min.js"></script>
+    <style>
+      /* Intro overlay for the music video: rendered with transparency (MOV) and laid over
+         the opening loft shots, so the background stays clear. */
+      :root {
+        --accent: #ff5fd2;
+        --ink: #f5f0e8;
+      }
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        width: 1920px;
+        height: 1080px;
+        overflow: hidden;
+        background: transparent;
+      }
+      #root {
+        width: 100%;
+        height: 100%;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="main" data-start="0" data-duration="5.8" data-width="1920" data-height="1080">
+      <div
+        id="vfx-anamorphic-flare"
+        data-composition-id="vfx-anamorphic-flare"
+        data-composition-src="compositions/vfx-anamorphic-flare.html"
+        data-start="0"
+        data-duration="5.8"
+        data-track-index="0"
+        data-track-kind="graphics"
+        data-width="1920"
+        data-height="1080"
+        data-variable-values='{"backdrop":"transparent","tint":"#ff5fd2","emitters":22,"intensity":4,"timeScale":0.35,"streakLength":3,"hue":305,"hueSpread":45}'
+        style="z-index: 0"
+      ></div>
+      <div
+        id="logo"
+        data-composition-id="logo"
+        data-composition-src="compositions/logo.html"
+        data-start="0"
+        data-duration="2.3"
+        data-track-index="2"
+        data-track-kind="graphics"
+        data-width="1920"
+        data-height="1080"
+        data-variable-values='{"tagline":"presents","hold":0.7}'
+        style="z-index: 2"
+      ></div>
+      <div
+        id="title"
+        data-composition-id="title"
+        data-composition-src="compositions/title.html"
+        data-start="0"
+        data-duration="5.8"
+        data-track-index="1"
+        data-track-kind="graphics"
+        data-width="1920"
+        data-height="1080"
+        style="z-index: 1"
+      ></div>
+    </div>
+    <script>
+      const tl = gsap.timeline({ paused: true });
+      // The flare field breathes in, then fades out with the title before the first lyric.
+      tl.fromTo("#vfx-anamorphic-flare", { opacity: 0 }, { opacity: 0.85, duration: 1.2, ease: "power1.out" }, 0);
+      tl.to("#vfx-anamorphic-flare", { opacity: 0, duration: 1.1, ease: "power1.in" }, 4.5);
+      window.__timelines["main"] = tl;
+    </script>
+  </body>
+</html>

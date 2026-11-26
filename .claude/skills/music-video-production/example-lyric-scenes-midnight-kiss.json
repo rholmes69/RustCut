@@ -1,0 +1,174 @@
+{
+ "name": "MidNight Kiss - lyric video",
+ "musicVideo": "MidNight Kiss.rcproj",
+ "output": "MidNight Kiss - lyric video.rcproj",
+ "background": "lyric-background.mp4",
+ "intro": "MidNight Kiss - intro with logo (HyperFrames).mov",
+ "outro": "MidNight Kiss - outro with logo (HyperFrames).mp4",
+ "dissolve": 1.477833,
+ "endDip": 1.477833,
+ "textColor": [
+  255,
+  240,
+  250,
+  255
+ ],
+ "scenes": [
+  {
+   "start": 5.8,
+   "end": 22.25,
+   "still": "music-video-aidan-b-midnight-kiss-atl-remix/shot-01.png",
+   "note": "intro: alone at midnight"
+  },
+  {
+   "start": 22.25,
+   "end": 34.9,
+   "still": "music-video-aidan-b-midnight-kiss-atl-remix/shot-03.png",
+   "note": "then you walked in"
+  },
+  {
+   "start": 34.9,
+   "end": 46.94,
+   "still": "music-video-aidan-b-midnight-kiss-atl-remix/shot-04.png",
+   "note": "social media stage"
+  },
+  {
+   "start": 46.94,
+   "end": 59.05,
+   "still": "music-video-aidan-b-midnight-kiss-atl-remix/shot-07.png",
+   "note": "as our lips meet"
+  },
+  {
+   "start": 59.05,
+   "end": 69.68,
+   "still": "music-video-aidan-b-midnight-kiss-atl-remix/shot-11.png",
+   "note": "chorus 1: the first kiss"
+  },
+  {
+   "start": 69.68,
+   "end": 79.87,
+   "still": "music-video-aidan-b-midnight-kiss-atl-remix/shot-12.png",
+   "note": "Aidan performing"
+  },
+  {
+   "start": 79.87,
+   "end": 92.67,
+   "still": "music-video-aidan-b-midnight-kiss-atl-remix/shot-08-2.png",
+   "note": "verse 2: eyes locked"
+  },
+  {
+   "start": 92.67,
+   "end": 99.84,
+   "still": "music-video-aidan-b-midnight-kiss-atl-remix/shot-05.png",
+   "note": "all is right"
+  },
+  {
+   "start": 99.84,
+   "end": 110.64,
+   "still": "music-video-aidan-b-midnight-kiss-atl-remix/shot-13.png",
+   "note": "chorus 2: Aishyla spinning"
+  },
+  {
+   "start": 110.64,
+   "end": 118.5,
+   "still": "music-video-aidan-b-midnight-kiss-atl-remix/shot-06-2.png",
+   "note": "our own spark"
+  },
+  {
+   "start": 118.5,
+   "end": 129,
+   "still": "music-video-aidan-b-midnight-kiss-atl-remix/shot-23.png",
+   "note": "sax solo: the keys"
+  },
+  {
+   "start": 129,
+   "end": 139.78,
+   "still": "music-video-aidan-b-midnight-kiss-atl-remix/shot-18-2.png",
+   "note": "sax solo: the saxophonist"
+  },
+  {
+   "start": 139.78,
+   "end": 152.57,
+   "still": "music-video-aidan-b-midnight-kiss-atl-remix/shot-15.png",
+   "note": "second pass: into the rain"
+  },
+  {
+   "start": 152.57,
+   "end": 164.26,
+   "still": "music-video-aidan-b-midnight-kiss-atl-remix/shot-24.png",
+   "note": "taxi light trails"
+  },
+  {
+   "start": 164.26,
+   "end": 176.38,
+   "still": "music-video-aidan-b-midnight-kiss-atl-remix/shot-17.png",
+   "note": "under one umbrella"
+  },
+  {
+   "start": 176.38,
+   "end": 187.71,
+   "still": "music-video-aidan-b-midnight-kiss-atl-remix/shot-16.png",
+   "note": "steps through the puddle"
+  },
+  {
+   "start": 187.71,
+   "end": 199.34,
+   "still": "music-video-aidan-b-midnight-kiss-atl-remix/shot-25.png",
+   "note": "chorus 3: neon puddle"
+  },
+  {
+   "start": 199.34,
+   "end": 210.68,
+   "still": "music-video-aidan-b-midnight-kiss-atl-remix/shot-26.png",
+   "note": "her hand on the blazer"
+  },
+  {
+   "start": 210.68,
+   "end": 222.66,
+   "still": "music-video-aidan-b-midnight-kiss-atl-remix/shot-19-2.png",
+   "note": "the rooftop at 3 a.m."
+  },
+  {
+   "start": 222.66,
+   "end": 234.65,
+   "still": "music-video-aidan-b-midnight-kiss-atl-remix/shot-27.png",
+   "note": "silhouettes at the edge"
+  },
+  {
+   "start": 234.65,
+   "end": 246.79,
+   "still": "music-video-aidan-b-midnight-kiss-atl-remix/shot-14-2.png",
+   "note": "chorus 4: in the silence"
+  },
+  {
+   "start": 246.79,
+   "end": 256.64,
+   "still": "music-video-aidan-b-midnight-kiss-atl-remix/shot-20.png",
+   "note": "bridge: hands intertwined"
+  },
+  {
+   "start": 256.64,
+   "end": 266.91,
+   "still": "music-video-aidan-b-midnight-kiss-atl-remix/shot-09-2.png",
+   "note": "no filters needed"
+  },
+  {
+   "start": 266.91,
+   "end": 283.12,
+   "still": "music-video-aidan-b-midnight-kiss-atl-remix/shot-21-2.png",
+   "note": "final chorus"
+  },
+  {
+   "start": 283.12,
+   "end": 305,
+   "still": "music-video-aidan-b-midnight-kiss-atl-remix/shot-22-2.png",
+   "note": "outro: dawn over the skyline"
+  },
+  {
+   "start": 305,
+   "end": 331.44,
+   "still": "music-video-aidan-b-midnight-kiss-atl-remix/shot-28-2.png",
+   "note": "the neon goes out"
+  }
+ ]
+}
