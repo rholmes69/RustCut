@@ -1,6 +1,6 @@
 ---
 name: music-video-production
-description: The whole RustCut music-video production, start to finish, for an artist's song (e.g. Aidan B. with Aishyla) - treatment, stills and redraws, animation, story-order re-cut, b-roll, HyperFrames intro and outro cards with the logo, beat-matched transitions, then a matching lyric video, ending with exports and delivery. Use when the user asks for a new music video project "with everything", a lyric video for a finished music video, intro/outro cards with the logo, or asks which step comes next.
+description: The whole RustCut music-video production, start to finish, for an artist's song (e.g. Aidan B. with Aishyla) - treatment, stills and redraws, animation, story-order re-cut, b-roll, HyperFrames intro and outro cards with the logo, beat-matched transitions, then a matching lyric video, ending with exports and delivery. It starts by asking for the artist name, song title, treatment, lyrics and the audio file (default: Downloads). Use when the user asks for a new music video project "with everything", a lyric video for a finished music video, intro/outro cards with the logo, or asks which step comes next.
 ---
 
 # Music video production: treatment to lyric video
@@ -24,6 +24,29 @@ K=.claude/skills/music-video-production
 - Don't name celebrities in prompts. Don't alter images to get past a content filter.
 - If OpenRouter returns **HTTP 402**, nothing was charged: the account is out of credits. Tell the user and wait.
 - Disk is tight: build with `CARGO_INCREMENTAL=0 … --release --offline`. If an export fails with a full disk, ask before clearing `%TEMP%`.
+
+## 0. Ask the user first (before anything else)
+Unless the user already gave them in their message, ask for these five things **in one message**, numbered, before creating any folder or spending anything:
+
+1. **Artist name** (e.g. "Aidan B.").
+2. **Song title** (exactly as it should appear on the cards, e.g. "MidNight Kiss").
+3. **Music video treatment**: the story, look, cast and wardrobe. If they have none, offer to draft one from the lyrics (step 1).
+4. **Song lyrics**, with the section headers if they have them ([Verse 1], [Chorus]…).
+5. **Location of the audio file.** Default: the **Downloads** folder (`C:\Users\sales\Downloads`).
+
+For the audio file, look in the default location yourself and offer what's there, newest first:
+```bash
+ls -t /c/Users/sales/Downloads/*.{wav,mp3,flac,m4a,aiff} 2>/dev/null | head -8
+```
+Then use AskUserQuestion with up to four of those files as options (the newest one marked Recommended, especially if its name matches the song title), and the "Other" answer for a different path. If nothing is in Downloads, ask for the path.
+
+Rules for the answers:
+- Use the title and artist exactly as given (capitalisation included) for the project name, the folder `C:/Users/sales/Videos/RustCut AI/<Title> music video`, the cards and the YouTube details.
+- **Check the treatment isn't the lyrics pasted twice** (MidNight Kiss). If it is, say so and offer to draft one.
+- If the treatment names the artist's love interest or other cast, confirm who they are and which reference photo or character sheet to use (Aishyla's is in `Videos\RustCut AI\Checklist music video\`). Ask this together with anything else that's missing, not one question at a time.
+- Copy the audio file into the project folder; don't move the original.
+
+Then repeat the five answers back in a short summary with the estimate for stages 2–5, and wait for a go-ahead.
 
 ## The stages
 | # | Stage | How | Cost (measured) |
